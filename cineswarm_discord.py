@@ -356,18 +356,25 @@ class DiscordService:
             for i, m in enumerate(recs, 1):
                 lines.append(f"• **{m['title']} ({m.get('year') or 'n.d.'})** ({m.get('duration_mins')}m)\n  *{m.get('reason') or m.get('overview') or 'Vault Spotlight.'}*")
             return "\n".join(lines)
-        if lowered.startswith("commentary "):
-            title = text[11:].strip()
-            res = self.plane.generate_movie_commentary(title, actor=actor)
-            sample_markers = "\n".join([f"`{m.get('timestamp', '00:00')}` **[{m.get('category', 'Trivia')}]** {m.get('commentary')}" for m in res.get("markers", [])[:3]])
-            return f"🎙️ **AI Director Commentary Generated: {res['movie_title']}**\nDirector: `{res.get('director')}` | Total Trivia Markers: `{res.get('marker_count')}`\n\n**Sample Markers:**\n{sample_markers}\n\n*SRT Subtitle Overlay Generated ({len(res.get('srt', ''))} bytes)*"
-        if lowered.startswith("chapters "):
-            title = text[9:].strip()
-            res = self.plane.generate_movie_chapters(title, actor=actor)
-            ch_list = "\n".join([f"`{ch.get('start_timestamp', '00:00:00')}` **{ch.get('title')}**\n*{ch.get('summary')}*" for ch in res.get("chapters", [])[:4]])
-            return f"📑 **Plex Smart Chapter Summaries Generated: {res['movie_title']}**\nTotal Chapters: `{res.get('chapter_count')}`\n\n**Sample Narrative Chapters:**\n{ch_list}\n\n*WebVTT Chapter Track Generated ({len(res.get('vtt', ''))} bytes)*"
+        if lowered.startswith("filmography "):
+            person = text[12:].strip()
+            res = self.plane.discovery.scan_filmography_gaps(person, role="director") if self.plane.discovery else {}
+            cands = res.get("candidates", [])
+            if not cands:
+                return f"✓ Filmography complete! No missing titles found for {person}."
+            lines = [f"🎥 **Missing Filmography Titles for {person}:**"]
+            for m in cands[:5]:
+                lines.append(f"• **{m['title']} ({m.get('year') or 'n.d.'})** - {m.get('overview', '')[:100]}")
+            return "\n".join(lines)
+        if lowered.startswith("upgrade"):
+            media_type = "movie"
+            if "series" in lowered or "tv" in lowered:
+                media_type = "series"
+            res = self.plane.quality_analysis(media_type, actor=actor)
+            return f"🎬 **Quality Analysis Summary ({media_type.upper()}):**\nManaged: `{res.get('managed', 0)}` | Upgrade Candidates: `{res.get('upgrade_candidate_count', 0)}`\nUse dashboard or `!cine plan TITLE` to trigger upgrades."
         result = self.plane.agents.ask(text, actor)
         return result.get("answer") or "CineSwarm returned no answer."
+
 
 
 

@@ -482,3 +482,34 @@ class DiscoveryEngine:
                 )
                 inserted.append({"id": connection.execute("SELECT id FROM discovery_candidates WHERE candidate_key=?", (candidate_key,)).fetchone()[0], "title": candidate["title"], "franchise": raw.get("franchise_name"), "media_type": media_type, "score": score})
         return {"generated": len(generated), "inserted": len(inserted), "franchise_candidates": inserted}
+
+    def scan_filmography_gaps(self, person_name: str, role: str = "director", limit: int = 10) -> dict[str, Any]:
+        """Scan filmography for a specific director or actor to find missing catalog titles."""
+        if not self.model.configured:
+            raise AgentError("Gemini model is not configured")
+
+        existing_titles = self._existing_titles()
+        prompt = {
+            "role": "You are a filmography completeness specialist.",
+            "instruction": f"List the top key works directed by or starring '{person_name}' (role: {role}). Return only JSON.",
+            "person": person_name,
+            "role_type": role,
+            "schema": [{"title": "exact title", "year": 2020, "media_type": "movie", "overview": "short synopsis"}],
+            "count": limit,
+        }
+        response = self.model.complete([{"role": "system", "content": prompt["role"]}, {"role": "user", "content": json.dumps(prompt)}], temperature=0.3)
+        generated = parse_json(response)
+        missing = []
+        for item in generated:
+            title = str(item.get("title", "")).strip()
+            if title and title.casefold() not in existing_titles:
+                missing.append(item)
+
+        return {
+            "person": person_name,
+            "role": role,
+            "total_scanned": len(generated),
+            "missing_count": len(missing),
+            "candidates": missing[:limit]
+        }
+

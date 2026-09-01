@@ -2837,6 +2837,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.plane.get_budget_status())
         elif self.path == "/api/autonomous/policies":
             self._send(200, self.plane.get_policies())
+        elif self.path == "/metrics":
+            status = self.plane.store.status()
+            cat = status.get("catalog", {})
+            worker = status.get("worker", {})
+            metrics_text = (
+                "# HELP cineswarm_catalog_items Total items tracked in catalog\n"
+                "# TYPE cineswarm_catalog_items gauge\n"
+                f'cineswarm_catalog_items{{media_type="movie"}} {cat.get("movie", 0)}\n'
+                f'cineswarm_catalog_items{{media_type="series"}} {cat.get("series", 0)}\n'
+                "# HELP cineswarm_worker_healthy Worker service health status (1=healthy, 0=unhealthy)\n"
+                "# TYPE cineswarm_worker_healthy gauge\n"
+                f'cineswarm_worker_healthy {1 if worker.get("healthy") else 0}\n'
+            )
+            self._send(200, metrics_text, "text/plain; version=0.0.4; charset=utf-8")
+
         elif self.path == "/api/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
