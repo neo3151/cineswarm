@@ -99,6 +99,40 @@ class DiscoveryEngine:
                 if column not in columns:
                     connection.execute(f"ALTER TABLE discovery_candidates ADD COLUMN {column} {definition}")
             connection.execute("UPDATE discovery_candidates SET overall_score=score WHERE overall_score=0 AND score!=0")
+        try:
+            self.backfill_scores()
+        except Exception:
+            pass
+
+
+    def backfill_scores(self) -> int:
+        """Backfill component scores for existing discovery candidates."""
+        profile = self.taste_profile()
+        updated_count = 0
+        with sqlite3.connect(CONTROL_DB) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute("SELECT id, raw_json, rationale, edition, overall_score, score FROM discovery_candidates WHERE watch_affinity_score=0 AND (overall_score>0 OR score>0)").fetchall()
+            for row in rows:
+                try:
+                    candidate = json.loads(row["raw_json"] or "{}")
+                except json.JSONDecodeError:
+                    candidate = {}
+                candidate["edition"] = row["edition"]
+                candidate["reason"] = row["rationale"]
+                scores = self._score_components(candidate, profile)
+                overall = row["overall_score"] or row["score"] or scores["overall_score"]
+                connection.execute(
+                    """
+                    UPDATE discovery_candidates
+                    SET watch_affinity_score=?, collection_significance_score=?, rarity_preservation_score=?, storage_cost_score=?, acquisition_confidence_score=?, overall_score=?, score_reasons_json=?
+                    WHERE id=?
+                    """,
+                    (scores["watch_affinity_score"], scores["collection_significance_score"], scores["rarity_preservation_score"], scores["storage_cost_score"], scores["acquisition_confidence_score"], overall, json.dumps(scores["score_reasons"], sort_keys=True), row["id"])
+                )
+                updated_count += 1
+        return updated_count
+
+
 
     def _decision_feedback(self) -> list[dict[str, Any]]:
         try:
