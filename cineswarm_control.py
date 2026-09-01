@@ -1750,14 +1750,20 @@ class ControlPlane:
         if not self.agents or not self.agents.model.configured:
             raise AgentError("Gemini model client is not configured")
 
-        # Semantic dictionary for deep genre & keyword expansion
+        # Semantic dictionary for deep genre, mood & decade expansions
         theme_expansions = {
             "stoner": ["stoner", "weed", "marijuana", "cannabis", "pot", "slacker", "lebowski", "cheech", "chong", "harold", "kumar", "baked", "high", "reefer", "kush", "ganja", "hemp", "smoke", "joint"],
             "cyberpunk": ["cyberpunk", "hacker", "cyber", "android", "matrix", "synth", "virtual", "future", "dystopia", "net", "neon", "ai", "robot"],
-            "heist": ["heist", "bank", "robbery", "thief", "steal", "vault", "crime", "caper", "casino"],
-            "slasher": ["slasher", "killer", "mask", "machete", "camp", "cabin", "serial", "psycho", "horror", "murder"],
-            "sci-fi": ["sci-fi", "science fiction", "space", "alien", "galaxy", "time travel", "star", "cosmos", "future"]
+            "heist": ["heist", "bank", "robbery", "thief", "steal", "vault", "crime", "caper", "casino", "ocean", "job"],
+            "slasher": ["slasher", "killer", "mask", "machete", "camp", "cabin", "serial", "psycho", "horror", "murder", "halloween", "friday"],
+            "sci-fi": ["sci-fi", "science fiction", "space", "alien", "galaxy", "time travel", "star", "cosmos", "future", "orbit", "planetary"],
+            "noir": ["noir", "detective", "shadows", "investigation", "crime", "mystery", "femme fatale", "cop", "sleuth", "murder"],
+            "martial arts": ["martial arts", "kung fu", "karate", "ninja", "samurai", "sword", "fight", "dojo", "dragon", "shaolin"],
+            "80s action": ["action", "explosive", "cop", "mercenary", "commando", "hero", "gun", "chase", "revenge", "stallone", "schwarzenegger"],
+            "mind-bending": ["mind-bending", "psychological", "twist", "reality", "illusion", "dream", "paranoia", "memory", "subconscious"],
+            "comfort": ["comfort", "heartwarming", "cozy", "feel-good", "wholesome", "family", "nostalgia", "friendship"]
         }
+
 
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
             # Extract main keywords & check semantic map
