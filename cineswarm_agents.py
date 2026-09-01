@@ -26,14 +26,52 @@ class AgentError(RuntimeError):
 class AgentRole:
     name: str
     purpose: str
+    system_prompt: str
 
 
 ROLES = {
-    "librarian": AgentRole("librarian", "Reconcile and explain the state of Plex, Radarr, Sonarr, and the durable catalog."),
-    "curator": AgentRole("curator", "Analyze collection taste, recommend media, and design collections or playlists without changing the server."),
-    "health": AgentRole("health", "Identify service health, metadata, availability, and library consistency problems."),
-    "request": AgentRole("request", "Interpret media requests and describe the safe acquisition plan without submitting downloads."),
+    "librarian": AgentRole(
+        "librarian",
+        "Reconcile and explain the state of Plex, Radarr, Sonarr, and the durable catalog.",
+        "You are the CineSwarm Chief Librarian. You maintain absolute precision across Plex playback history, Radarr movies, Sonarr series, and local SQLite catalogs. Answer with exact numbers, provider IDs (TMDB/TVDB/IMDB), and edition statuses."
+    ),
+    "projectionist": AgentRole(
+        "projectionist",
+        "Analyze collection taste, recommend media, and design collections or playlists.",
+        "You are CineSwarm's Master Projectionist & Cult Curator. You combine deep knowledge of midnight cinema, genre classics, director filmographies, and user taste history to curate stunning Plex collections, playlists, and movie recommendations."
+    ),
+    "sentinel": AgentRole(
+        "sentinel",
+        "Identify service health, video corruption, storage limits, and mount integrity problems.",
+        "You are the CineSwarm Sentinel. You inspect video stream headers (ffprobe/ffmpeg), verify disk storage space, monitor storage pool mount points, and trigger auto-healing repair tasks for unreadable files."
+    ),
+    "scout": AgentRole(
+        "scout",
+        "Scan filmography gaps, missing franchise entries, and candidate recommendations.",
+        "You are the CineSwarm Discovery Scout. You analyze director and actor filmographies, track missing franchise sequels/prequels, and score candidate media using taste affinity metrics."
+    ),
+    "upgrader": AgentRole(
+        "upgrader",
+        "Analyze media codecs, resolution profiles, and missing subtitle/audio tracks.",
+        "You are the CineSwarm Quality Upgrader. You identify low-resolution or outdated video codecs (x264 720p), locate missing English subtitle/audio tracks, and propose replacement upgrades."
+    ),
+    "archivist": AgentRole(
+        "archivist",
+        "Maintain metadata integrity, edition tags, poster art, and catalog consistency.",
+        "You are the CineSwarm Archivist. You verify edition labels (Director's Cut, Extended, Unrated), poster artwork, release years, and external IDs across all catalog items."
+    ),
+    "annotator": AgentRole(
+        "annotator",
+        "Generate AI director trivia commentary and chapter marker overlays.",
+        "You are the CineSwarm Master Annotator. You generate timed trivia subtitle overlays (.en.trivia.srt) and scene chapter markers (.en.chapters.vtt) to transform vault movies into interactive criterion-edition experiences."
+    ),
+    "marshal": AgentRole(
+        "marshal",
+        "Enforce security policy, download budgets, emergency stop, and rate limiting.",
+        "You are the CineSwarm Security Marshal. You strictly enforce emergency-stop status, weekly download bandwidth limits, storage safety floors (500 GB free), and Basic Auth identity verification."
+    ),
 }
+
 
 
 class HostedModelClient:
@@ -51,7 +89,8 @@ class HostedModelClient:
             self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
         if not self.base_url:
             self.base_url = "https://api.openai.com/v1"
-        self.timeout = float(os.environ.get("CINESWARM_MODEL_TIMEOUT", "90"))
+        self.timeout = float(os.environ.get("CINESWARM_MODEL_TIMEOUT", "180"))
+
 
     @property
     def configured(self) -> bool:
@@ -730,15 +769,24 @@ class AgentOrchestrator:
     def select_roles(self, prompt: str) -> list[AgentRole]:
         text = prompt.lower()
         selected: list[AgentRole] = []
-        if any(word in text for word in ("health", "broken", "missing", "error", "status", "scan", "metadata")):
-            selected.append(ROLES["health"])
+        if any(word in text for word in ("health", "broken", "corrupt", "unreadable", "repair", "bitrot")):
+            selected.append(ROLES["sentinel"])
         if any(word in text for word in ("request", "download", "add", "get me", "wanted", "available")):
-            selected.append(ROLES["request"])
-        if any(word in text for word in ("recommend", "watch", "playlist", "collection", "taste", "similar", "mood")):
-            selected.append(ROLES["curator"])
+            selected.append(ROLES["scout"])
+        if any(word in text for word in ("recommend", "watch", "playlist", "collection", "taste", "similar", "mood", "curate")):
+            selected.append(ROLES["projectionist"])
         if any(word in text for word in ("library", "catalog", "plex", "radarr", "sonarr", "reconcile")):
             selected.append(ROLES["librarian"])
-        return selected or [ROLES["curator"]]
+        if any(word in text for word in ("codec", "resolution", "upgrade", "1080p", "4k", "remux", "subtitle", "audio")):
+            selected.append(ROLES["upgrader"])
+        if any(word in text for word in ("poster", "edition", "tag", "year", "tmdb", "metadata")):
+            selected.append(ROLES["archivist"])
+        if any(word in text for word in ("trivia", "commentary", "chapter", "srt", "vtt")):
+            selected.append(ROLES["annotator"])
+        if any(word in text for word in ("security", "emergency", "stop", "budget", "auth", "limit")):
+            selected.append(ROLES["marshal"])
+        return selected or [ROLES["projectionist"]]
+
 
     def ask(self, prompt: str, actor: str = "dashboard") -> dict[str, Any]:
         prompt = prompt.strip()
