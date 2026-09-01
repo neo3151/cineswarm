@@ -2930,7 +2930,51 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.plane.refresh("dashboard"))
         elif self.path == "/api/reconcile":
             self._send(200, self.plane.reconcile("dashboard"))
+        elif self.path == "/api/gem/action":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                action_type = payload.get("action", "").lower()
+                params = payload.get("parameters", {})
+                actor = "gemini-gem"
+                
+                if action_type == "add":
+                    term = params.get("title", "")
+                    m_type = params.get("media_type", "movie")
+                    plan = self.plane.planner.plan(m_type, term) if self.plane.planner else {}
+                    cands = plan.get("candidates", [])
+                    if not cands:
+                        self._send(404, {"error": f"No {m_type} candidate found for '{term}'"})
+                        return
+                    roots = plan.get("root_folders", [])
+                    profiles = plan.get("quality_profiles", [])
+                    if not roots or not profiles:
+                        self._send(400, {"error": "Missing root folder or quality profile"})
+                        return
+                    add_payload = {"media_type": m_type, "candidate": cands[0], "root_folder_path": roots[0]["path"], "quality_profile_id": profiles[0]["id"]}
+                    task_id = self.plane.store.create_task(f"{'radarr' if m_type == 'movie' else 'sonarr'}_add_request", actor, add_payload)
+                    res = self.plane.approve_task(task_id, actor)
+                    self._send(200, {"status": "success", "action": "add", "title": cands[0].get("title"), "result": res})
+                elif action_type == "scan_filmography":
+                    person = params.get("person", "")
+                    role = params.get("role", "director")
+                    res = self.plane.discovery.scan_filmography_gaps(person, role) if self.plane.discovery else {}
+                    self._send(200, {"status": "success", "action": "scan_filmography", "result": res})
+                elif action_type == "curate":
+                    theme = params.get("theme", "")
+                    mode = params.get("mode", "collection")
+                    res = self.plane.curate_collection(theme, limit=50, mode=mode, actor=actor)
+                    self._send(200, {"status": "success", "action": "curate", "result": res})
+                elif action_type == "emergency_stop":
+                    enable = bool(params.get("enabled", True))
+                    self.plane.store.set_policy("CINESWARM_AUTO_EMERGENCY_STOP", "true" if enable else "false")
+                    self._send(200, {"status": "success", "action": "emergency_stop", "emergency_stop": enable})
+                else:
+                    self._send(400, {"error": f"Unsupported Gem action '{action_type}'"})
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
         elif self.path == "/api/chat":
+
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
