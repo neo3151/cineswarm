@@ -390,6 +390,11 @@ class Worker:
             return result
         if job_type == "catalog_sync":
             sync_catalog()
+            try:
+                from export_gem_knowledge import generate_gem_knowledge
+                generate_gem_knowledge()
+            except Exception as exc:
+                print(f"Failed to auto-update Gem knowledge: {exc}", flush=True)
             return {"status": "catalog_synced"}
         if job_type == "discovery_refresh":
             if os.environ.get("CINESWARM_DISCOVERY_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
@@ -576,8 +581,14 @@ class Worker:
             res = self.plane.watch_recommendations(max_minutes=150, limit=3, actor="worker")
             counts = self.control_store.catalog_counts()
             digest_payload = {"counts": counts, "operational_summary": self.control_store.operational_summary(24), "recommendations": res.get("recommendations", [])}
+            try:
+                from export_gem_knowledge import generate_gem_knowledge
+                generate_gem_knowledge()
+            except Exception as exc:
+                print(f"Failed to update Gem knowledge during digest: {exc}", flush=True)
             self._send_notification("daily_digest", digest_payload, "daily_digest", force=True)
             return {"status": "completed", "digest": digest_payload}
+
         raise RuntimeError(f"Unknown worker job type: {job_type}")
 
     @staticmethod
