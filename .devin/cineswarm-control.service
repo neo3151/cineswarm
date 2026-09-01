@@ -1,0 +1,17 @@
+[Unit]
+Description=CineSwarm web dashboard and control plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/cineswarm
+EnvironmentFile=-%h/workspace/cineswarm/.env
+ExecStart=/usr/bin/python3 %h/workspace/cineswarm/cineswarm_control.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

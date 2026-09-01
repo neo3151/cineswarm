@@ -1,0 +1,19 @@
+[Unit]
+Description=CineSwarm Discord bot
+After=network-online.target cineswarm-control.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=2min
+WorkingDirectory=%h/workspace/cineswarm
+EnvironmentFile=-%h/workspace/cineswarm/.env
+ExecStart=%h/workspace/cineswarm/.venv/bin/python %h/workspace/cineswarm/cineswarm_discord.py
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

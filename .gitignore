@@ -1,0 +1,31 @@
+# Secrets & environment
+.env
+.~lock..env#
+restore_credentials.sh
+*.key
+*.secret
+
+# SQLite Databases & Backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+backups/
+
+# Python & Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Temporary / Generated Reports & Data
+*.pdf
+report_temp.html
+LATEST_VAULT_ADDITIONS.md
+
+# OS & Editor files
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,105 @@
+services:
+  dashboard:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${CINESWARM_CONTROL_PORT:-8787}:8787"
+    environment: &cineswarm-environment
+      CINESWARM_CONTROL_HOST: 0.0.0.0
+      CINESWARM_CONTROL_PORT: 8787
+      CINESWARM_CONTROL_DB: /data/cineswarm_control.db
+      CINESWARM_CATALOG_DB: /data/cineswarm_catalog.db
+      CINESWARM_OUTPUT_MD: /data/LATEST_VAULT_ADDITIONS.md
+      CINESWARM_BACKUP_DIR: /backups
+      CINESWARM_PATH_MAP: /media=/media,/data=/media
+      CINESWARM_PRESERVATION_ROOTS: /media
+      CINESWARM_PRESERVATION_UNION_ROOTS: /media
+      CINESWARM_PRESERVATION_BRANCHES: /media
+      CINESWARM_PRESERVATION_MOUNTS: /media
+      PLEX_URL: ${PLEX_URL:-http://host.docker.internal:32400}
+      PLEX_TOKEN: ${PLEX_TOKEN:-}
+      RADARR_URL: ${RADARR_URL:-http://host.docker.internal:7878}
+      RADARR_API_KEY: ${RADARR_API_KEY:-}
+      SONARR_URL: ${SONARR_URL:-http://host.docker.internal:8989}
+      SONARR_API_KEY: ${SONARR_API_KEY:-}
+      SABNZBD_URL: ${SABNZBD_URL:-}
+      SABNZBD_API_KEY: ${SABNZBD_API_KEY:-}
+      CINESWARM_MODEL_PROVIDER: ${CINESWARM_MODEL_PROVIDER:-gemini}
+      CINESWARM_MODEL_BASE_URL: ${CINESWARM_MODEL_BASE_URL:-}
+      CINESWARM_MODEL_API_KEY: ${CINESWARM_MODEL_API_KEY:-}
+      CINESWARM_MODEL_NAME: ${CINESWARM_MODEL_NAME:-}
+      CINESWARM_DISCORD_BOT_TOKEN: ${CINESWARM_DISCORD_BOT_TOKEN:-}
+      CINESWARM_DISCORD_SETUP_CODE: ${CINESWARM_DISCORD_SETUP_CODE:-}
+      CINESWARM_DISCORD_REQUIRE_MENTION: ${CINESWARM_DISCORD_REQUIRE_MENTION:-true}
+      CINESWARM_DISCORD_PREFIX: ${CINESWARM_DISCORD_PREFIX:-!cine}
+      CINESWARM_DASHBOARD_USERNAME: ${CINESWARM_DASHBOARD_USERNAME:-}
+      CINESWARM_DASHBOARD_PASSWORD: ${CINESWARM_DASHBOARD_PASSWORD:-}
+    volumes:
+      - cineswarm-data:/data
+      - cineswarm-backups:/backups
+      - type: bind
+        source: ${CINESWARM_MEDIA_HOST_PATH:-./media}
+        target: /media
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    init: true
+    command: ["python", "cineswarm_worker.py"]
+    environment: *cineswarm-environment
+    volumes:
+      - cineswarm-data:/data
+      - cineswarm-backups:/backups
+      - type: bind
+        source: ${CINESWARM_MEDIA_HOST_PATH:-./media}
+        target: /media
+        read_only: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  discord:
+    build: .
+    restart: unless-stopped
+    init: true
+    command: ["python", "cineswarm_discord.py"]
+    profiles: ["discord"]
+    environment: *cineswarm-environment
+    volumes:
+      - cineswarm-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  cineswarm-data:
+  cineswarm-backups:

@@ -1,0 +1,19 @@
+[Unit]
+Description=CineSwarm autonomous maintenance worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=15min
+WorkingDirectory=%h/workspace/cineswarm
+EnvironmentFile=-%h/workspace/cineswarm/.env
+ExecStart=/usr/bin/python3 %h/workspace/cineswarm/cineswarm_worker.py
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
