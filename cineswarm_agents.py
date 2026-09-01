@@ -834,21 +834,23 @@ class AgentOrchestrator:
             message = "The agent swarm is connected to the local catalog, but the hosted model is not configured yet. Add a Gemini key as CINESWARM_MODEL_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY in .env."
             self.store.audit(actor, "agent_request", ",".join(role.name for role in roles), "read-only", "not_configured", {})
             return {"answer": message, "roles": [role.name for role in roles], "context": context, "model_configured": False}
-        role_text = "\n".join(f"- {role.name}: {role.purpose}" for role in roles)
+        role_text = "\n".join(f"- {role.name} ({role.purpose}):\n  SYSTEM PROMPT: \"{role.system_prompt}\"" for role in roles)
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are the CineSwarm supervisor coordinating specialist agents. "
+                    "You are the CineSwarm supervisor coordinating a team of specialized AI agents. "
+                    "Incorporate the precise perspectives, guidelines, and expertise of the active specialists listed below. "
                     "Answer the user's request directly using live real-time telemetry context. "
                     "You have full access to live active Plex playback streams, Radarr & Sonarr download queues, and the local catalog. "
                     "If the user asks what they are currently watching or what is downloading, report the live session telemetry. "
                     "For recommendations, provide actual titles and concise reasons. Keep movies and series distinct.\n\n"
-                    f"Active specialists:\n{role_text}"
+                    f"Active Specialists & Instructions:\n{role_text}"
                 ),
             },
             {"role": "user", "content": f"User request:\n{prompt}\n\nCurrent local context:\n{json.dumps(context, ensure_ascii=False)}"},
         ]
+
         try:
             answer = self.model.complete(messages)
         except AgentError as exc:
