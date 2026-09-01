@@ -347,8 +347,39 @@ class Worker:
         discord_delivery = bool(bot_url or discord_webhook or "discord.com/api/webhooks/" in target_url)
         if discord_delivery:
             color = 15158332 if any(marker in event_type for marker in ("failed", "error", "alert", "unhealthy")) else 3066993
-            embed = {"title": f"CineSwarm: {event_type.replace('_', ' ').title()}", "description": f"```json\n{json_text(details)[:3500]}\n```", "color": color, "timestamp": timestamp}
+            title = f"CineSwarm: {event_type.replace('_', ' ').title()}"
+            fields = []
+
+            if event_type == "daily_digest":
+                title = "📰 CineSwarm Daily Library Digest"
+                counts = payload.get("counts", {})
+                fields.append({"name": "Vault Status", "value": f"🎬 `{counts.get('movie', 0)} Movies` | 📺 `{counts.get('series', 0)} TV Series`", "inline": False})
+                recs = payload.get("recommendations", [])
+                if recs:
+                    rec_lines = []
+                    for i, r in enumerate(recs[:3], 1):
+                        rec_lines.append(f"**#{i} {r.get('title')} ({r.get('year') or 'n.d.'})** ({r.get('duration_mins', 90)}m)\n*{r.get('reason') or r.get('overview') or 'Vault Spotlight.'}*")
+                    fields.append({"name": "🍿 Top Watch Recommendations for Today", "value": "\n\n".join(rec_lines), "inline": False})
+                op_sum = payload.get("operational_summary", {})
+                if op_sum:
+                    aud = op_sum.get("audit", {})
+                    fields.append({"name": "⚡ Operational Telemetry (Last 24h)", "value": f"Audits: `{aud.get('successes', 0)} Success` | `{aud.get('failures', 0)} Failures`", "inline": False})
+                embed = {"title": title, "color": color, "fields": fields, "timestamp": timestamp}
+            elif event_type in ("autopilot_decision", "startup_ready"):
+                decision_id = payload.get("decision_id", "n/a")
+                status = str(payload.get("status", "completed")).upper()
+                title = f"🤖 Autopilot Decision: {payload.get('title') or payload.get('candidate_id') or 'System Action'}"
+                fields.append({"name": "Status / Decision", "value": f"`{status}` (ID: `{decision_id}`)", "inline": True})
+                if payload.get("service_id"):
+                    fields.append({"name": "Service ID", "value": f"`{payload['service_id']}`", "inline": True})
+                if payload.get("error"):
+                    fields.append({"name": "Error Details", "value": f"```{payload['error']}```", "inline": False})
+                embed = {"title": title, "color": color, "fields": fields, "timestamp": timestamp}
+            else:
+                embed = {"title": title, "description": f"```json\n{json_text(details)[:3500]}\n```", "color": color, "timestamp": timestamp}
+
             body = {"embeds": [embed]} if bot_url else {"username": "CineSwarm", "embeds": [embed]}
+
         else:
             body = details
         try:
