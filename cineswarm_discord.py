@@ -129,12 +129,31 @@ class DiscordService:
 
     def _status(self) -> str:
         status = self.plane.store.status()
-        services = ", ".join(f"{item['service']}: {item['status']}" for item in status.get("services", []))
+        services = status.get("services", [])
+        srv_lines = []
+        for item in services:
+            st = item.get("status", "unknown")
+            icon = "🟢" if st == "healthy" else "🔴"
+            srv_lines.append(f"  {icon} **{item['service'].capitalize()}**: `{st.upper()}`")
+        srv_str = "\n".join(srv_lines) if srv_lines else "  • No service telemetry"
+
         worker = status.get("worker") or {}
+        worker_icon = "🟢" if worker.get("healthy") else "🟡"
         catalog = status.get("catalog") or {}
-        movie_queue = self.plane.planner.queue("movie").get("total_records", 0)
-        series_queue = self.plane.planner.queue("series").get("total_records", 0)
-        return f"Services: {services}\nWorker: {'healthy' if worker.get('healthy') else 'stale'} ({worker.get('status', 'unknown')}, {worker.get('age_seconds', '—')}s)\nCatalog: {catalog.get('movie', 0)} movies, {catalog.get('series', 0)} series\nQueues: {movie_queue} Radarr, {series_queue} Sonarr"
+        movie_queue = self.plane.planner.queue("movie").get("total_records", 0) if self.plane.planner else 0
+        series_queue = self.plane.planner.queue("series").get("total_records", 0) if self.plane.planner else 0
+
+        return (
+            "🛰️ **CineSwarm Operational Status**\n"
+            "```text\n"
+            f"Vault Catalog : {catalog.get('movie', 0)} Movies | {catalog.get('series', 0)} Series\n"
+            f"Active Queues : {movie_queue} Radarr Downloads | {series_queue} Sonarr Downloads\n"
+            f"Sentinel Status: {'HEALTHY' if worker.get('healthy') else 'STALE'} ({worker.get('status', 'unknown')})\n"
+            "```\n"
+            "**Service Health Telemetry:**\n"
+            f"{srv_str}"
+        )
+
 
     def _full_autopilot(self) -> bool:
         emergency = self.plane.store.get_policy("CINESWARM_AUTO_EMERGENCY_STOP") or os.environ.get("CINESWARM_AUTO_EMERGENCY_STOP", "false")
