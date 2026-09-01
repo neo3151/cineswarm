@@ -16,8 +16,9 @@ class MediaHealthScanner:
     def __init__(self, db_path: str = CATALOG_DB):
         self.db_path = db_path
 
-    def inspect_file(self, filepath: str) -> dict[str, Any]:
+    def inspect_file(self, filepath: str, deep_decode: bool = False) -> dict[str, Any]:
         """Perform fast ffprobe header & stream integrity inspection."""
+
         if not os.path.exists(filepath):
             return {"status": "missing", "error": "File does not exist on disk"}
 
@@ -55,17 +56,25 @@ class MediaHealthScanner:
             video_codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "video"), "unknown")
             audio_codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), "unknown")
 
-            return {
+            res_dict = {
                 "status": "healthy",
                 "duration_mins": round(duration / 60, 1),
                 "video_codec": video_codec,
                 "audio_codec": audio_codec,
                 "size_mb": round(os.path.getsize(filepath) / (1024 * 1024), 1)
             }
+
+            if deep_decode:
+                decode_res = self.deep_decode_check(filepath)
+                if decode_res["status"] == "corrupt":
+                    return decode_res
+
+            return res_dict
         except subprocess.TimeoutExpired:
             return {"status": "corrupt", "error": "ffprobe inspection timed out (unreadable header)"}
         except Exception as exc:
             return {"status": "corrupt", "error": str(exc)}
+
 
     def deep_decode_check(self, filepath: str, sample_seconds: int = 10) -> dict[str, Any]:
         """Perform ffmpeg sample decode check to detect corrupted frames."""
