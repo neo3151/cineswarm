@@ -2867,7 +2867,56 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"editions": self.plane.store.editions(catalog_item_id, candidate_id, limit)})
             except ValueError:
                 self._send(400, {"error": "edition filters must be integers"})
+        elif self.path.startswith("/api/catalog"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = query.get("q", [""])[0].strip()
+            genre = query.get("genre", [""])[0].strip()
+            media_type = query.get("media_type", [""])[0].strip()
+            page = int(query.get("page", ["1"])[0])
+            limit = int(query.get("limit", ["50"])[0])
+            offset = (page - 1) * limit
+
+            with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                where_clauses = ["present = 1"]
+                params = []
+                if q:
+                    where_clauses.append("(lower(title) LIKE ? OR lower(overview) LIKE ?)")
+                    needle = f"%{q.lower()}%"
+                    params.extend([needle, needle])
+                if genre:
+                    where_clauses.append("lower(genres_json) LIKE ?")
+                    params.append(f"%{genre.lower()}%")
+                if media_type:
+                    where_clauses.append("media_type = ?")
+                    params.append(media_type.lower())
+
+                where_sql = " AND ".join(where_clauses)
+                total = connection.execute(f"SELECT COUNT(*) FROM catalog_items WHERE {where_sql}", params).fetchone()[0]
+                rows = connection.execute(
+                    f"SELECT id, title, year, media_type, source, source_native_id, genres_json, overview, created_at FROM catalog_items WHERE {where_sql} ORDER BY year DESC, title ASC LIMIT ? OFFSET ?",
+                    params + [limit, offset]
+                ).fetchall()
+                
+                items = []
+                for r in rows:
+                    item_dict = dict(r)
+                    try:
+                        item_dict["genres"] = json.loads(item_dict.get("genres_json") or "[]")
+                    except Exception:
+                        item_dict["genres"] = []
+                    item_dict.pop("genres_json", None)
+                    items.append(item_dict)
+
+                self._send(200, {
+                    "total": total,
+                    "page": page,
+                    "limit": limit,
+                    "pages": (total + limit - 1) // limit if limit else 1,
+                    "items": items
+                })
         elif self.path.startswith("/api/operational-summary"):
+
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
                 self._send(200, self.plane.store.operational_summary(int(query.get("hours", ["24"])[0])))
