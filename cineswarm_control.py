@@ -8,7 +8,9 @@ import base64
 import hmac
 import html
 import json
+import math
 import os
+
 import platform
 import re
 import sqlite3
@@ -2981,46 +2983,44 @@ class Handler(BaseHTTPRequestHandler):
             page = int(query.get("page", ["1"])[0])
             limit = int(query.get("limit", ["50"])[0])
             offset = (page - 1) * limit
+            try:
+                with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True, timeout=30.0) as connection:
+                    connection.row_factory = sqlite3.Row
+                    where_clauses = ["present = 1"]
+                    params = []
+                    if q:
+                        where_clauses.append("(lower(title) LIKE ? OR lower(overview) LIKE ?)")
+                        needle = f"%{q.lower()}%"
+                        params.extend([needle, needle])
+                    if genre:
+                        where_clauses.append("lower(genres_json) LIKE ?")
+                        params.append(f"%{genre.lower()}%")
+                    if media_type:
+                        where_clauses.append("media_type = ?")
+                        params.append(media_type.lower())
 
-            with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
-                connection.row_factory = sqlite3.Row
-                where_clauses = ["present = 1"]
-                params = []
-                if q:
-                    where_clauses.append("(lower(title) LIKE ? OR lower(overview) LIKE ?)")
-                    needle = f"%{q.lower()}%"
-                    params.extend([needle, needle])
-                if genre:
-                    where_clauses.append("lower(genres_json) LIKE ?")
-                    params.append(f"%{genre.lower()}%")
-                if media_type:
-                    where_clauses.append("media_type = ?")
-                    params.append(media_type.lower())
+                    where_sql = " AND ".join(where_clauses)
+                    total = connection.execute(f"SELECT COUNT(*) FROM catalog_items WHERE {where_sql}", params).fetchone()[0]
+                    rows = connection.execute(
+                        f"SELECT id, title, year, media_type, source, source_native_id, genres_json, overview FROM catalog_items WHERE {where_sql} ORDER BY year DESC, title ASC LIMIT ? OFFSET ?",
+                        params + [limit, offset]
+                    ).fetchall()
 
-                where_sql = " AND ".join(where_clauses)
-                total = connection.execute(f"SELECT COUNT(*) FROM catalog_items WHERE {where_sql}", params).fetchone()[0]
-                rows = connection.execute(
-                    f"SELECT id, title, year, media_type, source, source_native_id, genres_json, overview, created_at FROM catalog_items WHERE {where_sql} ORDER BY year DESC, title ASC LIMIT ? OFFSET ?",
-                    params + [limit, offset]
-                ).fetchall()
-                
-                items = []
-                for r in rows:
-                    item_dict = dict(r)
-                    try:
-                        item_dict["genres"] = json.loads(item_dict.get("genres_json") or "[]")
-                    except Exception:
-                        item_dict["genres"] = []
-                    item_dict.pop("genres_json", None)
-                    items.append(item_dict)
+                    items = []
+                    for r in rows:
+                        item_dict = dict(r)
+                        try:
+                            item_dict["genres"] = json.loads(item_dict.get("genres_json") or "[]")
+                        except Exception:
+                            item_dict["genres"] = []
+                        item_dict.pop("genres_json", None)
+                        items.append(item_dict)
 
-                self._send(200, {
-                    "total": total,
-                    "page": page,
-                    "limit": limit,
-                    "pages": (total + limit - 1) // limit if limit else 1,
-                    "items": items
-                })
+                    pages = math.ceil(total / limit) if limit > 0 else 1
+                    self._send(200, {"items": items, "total": total, "page": page, "pages": pages, "limit": limit})
+            except Exception as e:
+                self._send(500, {"error": f"Catalog query failed: {str(e)}"})
+
         elif self.path.startswith("/api/operational-summary"):
 
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
