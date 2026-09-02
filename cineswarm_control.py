@@ -335,10 +335,12 @@ class PlexWriteClient(PlexApiClient):
                 body = response.read()
                 return ET.fromstring(body) if body else ET.Element("MediaContainer")
         except urllib.error.HTTPError as exc:
-            raise ServiceError(f"{self.config.name} returned HTTP {exc.code}") from exc
+            raise ServiceError(f"{self.config.name} request failed: {exc.__class__.__name__}") from exc
 
+    def create_playlist(self, title: str, rating_keys: list[str]) -> bool:
         if not rating_keys:
             return False
+
         try:
             machine_id = self.get("").get("machineIdentifier")
             if not machine_id:
@@ -365,7 +367,15 @@ class PlexWriteClient(PlexApiClient):
         except Exception:
             return False
 
+    def add_to_collection(self, section_key: str, collection_name: str, rating_key: str) -> bool:
+        try:
+            self.put_tag(section_key, rating_key, collection_name)
+            return True
+        except Exception:
+            return False
+
     def put_tag(self, section_key: str, rating_key: str, collection_name: str) -> None:
+
         params = {
             "type": "1",
             "id": rating_key,
@@ -373,6 +383,15 @@ class PlexWriteClient(PlexApiClient):
             "collection.locked": "1",
         }
         self.put(f"library/sections/{section_key}/all", params)
+
+    def set_poster(self, rating_key: str, poster_url: str) -> bool:
+        """Assign a high-resolution poster image URL to a Plex item or collection."""
+        try:
+            self.post(f"library/metadata/{rating_key}/posters", {"url": poster_url})
+            return True
+        except Exception:
+            return False
+
 
 
 class ArrWriteClient:
@@ -1782,11 +1801,11 @@ class ControlPlane:
                 params.extend([needle, needle, needle, needle])
             
             sql_where = " OR ".join(where_clauses) if where_clauses else "1=1"
-            rows = connection.execute(f"SELECT title, overview, genres_json FROM catalog_items WHERE present=1 AND ({sql_where}) LIMIT 1500", params).fetchall()
+            rows = connection.execute(f"SELECT title, overview, genres_json FROM catalog_items WHERE present=1 AND ({sql_where}) LIMIT 200", params).fetchall()
             
             # Fallback if specific search returns few items
-            if len(rows) < 100:
-                additional = connection.execute("SELECT title, overview, genres_json FROM catalog_items WHERE present=1 ORDER BY title LIMIT 1500").fetchall()
+            if len(rows) < 30:
+                additional = connection.execute("SELECT title, overview, genres_json FROM catalog_items WHERE present=1 ORDER BY RANDOM() LIMIT 200").fetchall()
                 rows.extend(additional)
 
             catalog_sample = []
@@ -1796,20 +1815,21 @@ class ControlPlane:
                     continue
                 catalog_sample.append(r[0])
                 seen.add(r[0])
-                if len(catalog_sample) >= 1500:
+                if len(catalog_sample) >= 200:
                     break
 
         prompt = {
             "role": "You are an elite film archivist and master cinema curator.",
             "requested_theme": prompt_theme,
             "instruction": f"Examine candidate_titles carefully. Select UP TO {limit} titles that TRULY belong to the theme '{prompt_theme}'. Find as many genuine, relevant, and classic matches as possible. Return a JSON object with 'collection_title', 'summary', and 'matched_titles' containing an array of exact strings from candidate_titles.",
-            "candidate_titles": catalog_sample[:1500],
+            "candidate_titles": catalog_sample[:200],
             "schema": {
                 "collection_title": "string",
                 "summary": "string",
                 "matched_titles": ["exact string title from candidate_titles"]
             }
         }
+
         response = self.agents.model.complete([
             {"role": "system", "content": prompt["role"]},
             {"role": "user", "content": json.dumps(prompt)}
