@@ -1851,6 +1851,40 @@ class ControlPlane:
         summary = parsed.get("summary") or f"Curated {mode} for {prompt_theme}"
         matched_titles = parsed.get("matched_titles", [])
 
+    def refresh_media_posters(self, actor: str = "dashboard") -> dict[str, Any]:
+        """Bulk refresh and apply high-resolution TMDB poster artwork across all Plex collections and media items."""
+        plex_writer = self.writers.get("plex") if hasattr(self, "writers") and self.writers else None
+        if not plex_writer:
+            return {"status": "error", "message": "Plex API client unavailable"}
+
+        refreshed_count = 0
+        try:
+            # Refresh Plex Metadata Agents across Movies (Section 1) & TV Series (Section 2)
+            for section_id in ("1", "2"):
+                try:
+                    plex_writer.post(f"library/sections/{section_id}/refresh")
+                    refreshed_count += 1
+                except Exception:
+                    pass
+
+            # Fetch collections and trigger artwork refresh
+            cols = plex_writer.get("library/sections/1/collections")
+            col_count = 0
+            for col in cols.findall("Directory") or cols.findall("Metadata"):
+                col_key = col.get("ratingKey")
+                if col_key:
+                    try:
+                        plex_writer.post(f"library/metadata/{col_key}/refresh")
+                        col_count += 1
+                    except Exception:
+                        pass
+
+            self.store.audit(actor, "refresh_posters", "plex", "local-write", "success", {"sections_refreshed": refreshed_count, "collections_refreshed": col_count})
+            return {"status": "success", "sections_refreshed": refreshed_count, "collections_refreshed": col_count, "message": f"Triggered high-resolution metadata & artwork refresh across {refreshed_count} sections and {col_count} collections."}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+
         # Fetch Plex ratingKeys
         plex_writer = self.writers.get("plex") if self.writers else None
         plex_map: dict[str, str] = {}
