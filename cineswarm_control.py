@@ -2110,11 +2110,57 @@ pre{font-family:'Fira Code',monospace;font-size:0.8rem;line-height:1.6;color:#a7
 
   <div class="cmd-bar">
     <button id="tabBtn-overview" onclick="switchTab('overview')">📊 Overview & Live SSE</button>
+    <button id="tabBtn-catalog" class="secondary" onclick="switchTab('catalog')">📚 Vault Catalog Browser</button>
     <button id="tabBtn-curation" class="secondary" onclick="switchTab('curation')">🎬 Curation & Playlists</button>
     <button id="tabBtn-acquisition" class="secondary" onclick="switchTab('acquisition')">🎯 Acquisition & Discovery</button>
     <button id="tabBtn-analytics" class="secondary" onclick="switchTab('analytics')">📈 Analytics & Health</button>
     <button id="tabBtn-terminal" class="secondary" onclick="switchTab('terminal')">💻 Neural Terminal</button>
   </div>
+
+  <!-- TAB 6: VAULT CATALOG BROWSER -->
+  <div id="tabView-catalog" class="tab-content" style="display:none">
+    <div class="card">
+      <h2>📚 Vault Media Catalog Browser</h2>
+      <p>Browse, filter, and search all 10,700+ movies and TV series in your local vault. Automatically updates in real time as media is added or removed.</p>
+      
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+        <input id="catSearchInput" placeholder="Search title or plot overview..." style="flex:2;min-width:240px" onkeyup="if(event.key==='Enter')searchCatalogUI(1)">
+        <select id="catGenreSelect" style="flex:1;min-width:150px" onchange="searchCatalogUI(1)">
+          <option value="">All Genres</option>
+          <option value="Action">Action</option>
+          <option value="Adventure">Adventure</option>
+          <option value="Animation">Animation</option>
+          <option value="Comedy">Comedy</option>
+          <option value="Crime">Crime</option>
+          <option value="Drama">Drama</option>
+          <option value="Fantasy">Fantasy</option>
+          <option value="Horror">Horror</option>
+          <option value="Mystery">Mystery</option>
+          <option value="Romance">Romance</option>
+          <option value="Science Fiction">Science Fiction</option>
+          <option value="Thriller">Thriller</option>
+        </select>
+        <select id="catTypeSelect" style="width:130px" onchange="searchCatalogUI(1)">
+          <option value="">All Media</option>
+          <option value="movie">Movies Only</option>
+          <option value="series">TV Series Only</option>
+        </select>
+        <button onclick="searchCatalogUI(1)">🔍 Search Catalog</button>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span id="catTotalCount" style="font-family:'Fira Code';font-size:0.85rem;color:var(--cyan)">Loading catalog items...</span>
+        <div style="display:flex;gap:8px">
+          <button class="secondary" style="font-size:0.8rem;padding:4px 10px" onclick="prevCatalogPage()">◀ Prev</button>
+          <span id="catPageNum" style="font-family:'Fira Code';font-size:0.85rem;color:#fff;align-self:center">Page 1</span>
+          <button class="secondary" style="font-size:0.8rem;padding:4px 10px" onclick="nextCatalogPage()">Next ▶</button>
+        </div>
+      </div>
+
+      <div id="catalogGrid" class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"><p style="color:var(--muted)">Fetching library catalog items...</p></div>
+    </div>
+  </div>
+
 
   <!-- TAB 1: OVERVIEW & LIVE SSE -->
   <div id="tabView-overview" class="tab-content">
@@ -2786,8 +2832,68 @@ async function sendDecisionFeedback(decision_id, sentiment) {
   loadDecisionLog();
 }
 
-load(); loadDiscovery(); loadAutoStatus(); loadPlaylists(); loadAnalyticsCharts(); loadDecisionLog();
+// --- Vault Catalog Browser JS Engine ---
+let currentCatPage = 1;
+let totalCatPages = 1;
+
+async function searchCatalogUI(page = 1) {
+  currentCatPage = page;
+  const q = encodeURIComponent((document.getElementById('catSearchInput').value || '').trim());
+  const genre = encodeURIComponent(document.getElementById('catGenreSelect').value || '');
+  const mediaType = encodeURIComponent(document.getElementById('catTypeSelect').value || '');
+  
+  const gridEl = document.getElementById('catalogGrid');
+  gridEl.innerHTML = '<p style="color:var(--cyan)">Querying vault catalog matrix...</p>';
+
+  try {
+    const res = await fetch(`/api/catalog?q=${q}&genre=${genre}&media_type=${mediaType}&page=${page}&limit=48`);
+    const data = await res.json();
+    totalCatPages = data.pages || 1;
+
+    document.getElementById('catTotalCount').textContent = `Total Vault Items: ${data.total.toLocaleString()} (${data.items.length} shown)`;
+    document.getElementById('catPageNum').textContent = `Page ${data.page} of ${totalCatPages}`;
+
+    if (!data.items.length) {
+      gridEl.innerHTML = '<div style="background:rgba(2,12,7,0.7);padding:20px;border-radius:10px;border:1px solid var(--line);grid-column:1/-1"><p style="color:var(--muted);margin:0">No matching titles found in your vault catalog.</p></div>';
+      return;
+    }
+
+    gridEl.innerHTML = data.items.map(item => {
+      const genresStr = (item.genres || []).slice(0, 3).map(g => `<span style="background:rgba(0,240,255,0.1);border:1px solid var(--line-bright);color:var(--cyan);font-size:0.7rem;padding:2px 6px;border-radius:4px">${g}</span>`).join(' ');
+      const overview = (item.overview || 'No overview available.').slice(0, 110) + '...';
+      const badge = item.media_type === 'movie' ? '<span class="ok" style="font-size:0.75rem">MOVIE</span>' : '<span style="color:var(--accent);font-size:0.75rem">TV SERIES</span>';
+      return `
+        <div style="background:rgba(2,12,7,0.85);padding:14px;border-radius:12px;border:1px solid var(--line);display:flex;flex-direction:column;justify-space-between;box-shadow:0 4px 15px rgba(0,0,0,0.4)">
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <strong style="color:#fff;font-size:0.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px" title="${item.title}">${item.title}</strong>
+              <span style="font-family:'Fira Code';font-size:0.8rem;color:var(--muted)">${item.year || 'n.d.'}</span>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+              ${badge}
+              <div style="display:flex;gap:4px;flex-wrap:wrap">${genresStr}</div>
+            </div>
+            <p style="margin:8px 0 0;font-size:0.78rem;color:var(--muted);line-height:1.4">${overview}</p>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    gridEl.innerHTML = `<p style="color:var(--bad)">Failed to query catalog: ${err.message}</p>`;
+  }
+}
+
+function prevCatalogPage() {
+  if (currentCatPage > 1) searchCatalogUI(currentCatPage - 1);
+}
+
+function nextCatalogPage() {
+  if (currentCatPage < totalCatPages) searchCatalogUI(currentCatPage + 1);
+}
+
+load(); loadDiscovery(); loadAutoStatus(); loadPlaylists(); loadAnalyticsCharts(); loadDecisionLog(); searchCatalogUI(1);
 </script></body></html>"""
+
 
 # Keep the legacy literal above for source compatibility while serving the reorganized,
 # independently testable dashboard module at runtime.
