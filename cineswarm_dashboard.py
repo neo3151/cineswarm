@@ -26,6 +26,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="brand"><strong>CINESWARM</strong><span>Media operations control plane</span></div>
   <nav class="nav">
     <button type="button" data-view="overview" aria-current="page">Overview</button>
+    <button type="button" data-view="catalog">Catalog</button>
     <button type="button" data-view="operations">Operations</button>
     <button type="button" data-view="discovery">Discovery</button>
     <button type="button" data-view="curation">Curation</button>
@@ -33,6 +34,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <button type="button" data-view="analytics">Analytics</button>
     <button type="button" data-view="terminal">Terminal</button>
   </nav>
+
   <div class="sidebar-foot">Policy-controlled automation<br><span id="nav-freshness">Awaiting status</span></div>
 </aside>
 <main class="main">
@@ -51,6 +53,33 @@ DASHBOARD_HTML = r"""<!doctype html>
  </div>
  <div class="grid two"><article class="card"><h3>Services</h3><div id="overview-services" class="service-list loading">Loading services</div></article><article class="card"><h3>Top actionable issues</h3><div id="overview-issues" class="stack loading">Loading issues</div></article></div>
  <article class="card" style="margin-top:14px"><div class="split"><h3>Recent decisions</h3><button class="secondary" type="button" data-view-jump="operations">Open operations</button></div><div id="overview-decisions" class="stack loading">Loading decisions</div></article>
+</section>
+<section class="view" id="view-catalog" data-title="Catalog" hidden>
+ <div class="view-head"><div><h2>Vault catalog browser</h2><p>Search, filter, and browse all 10,700+ movies and series in your local vault.</p></div></div>
+ <article class="card">
+  <form id="catalog-form" class="form-row">
+   <label class="field">Search query<input name="q" placeholder="Title or plot overview..."></label>
+   <label class="field">Genre
+    <select name="genre">
+     <option value="">All Genres</option>
+     <option value="Action">Action</option><option value="Adventure">Adventure</option><option value="Animation">Animation</option><option value="Comedy">Comedy</option><option value="Crime">Crime</option><option value="Drama">Drama</option><option value="Fantasy">Fantasy</option><option value="Horror">Horror</option><option value="Mystery">Mystery</option><option value="Romance">Romance</option><option value="Science Fiction">Sci-Fi</option><option value="Thriller">Thriller</option>
+    </select>
+   </label>
+   <label class="field">Media type
+    <select name="media_type"><option value="">All Media</option><option value="movie">Movies</option><option value="series">TV Series</option></select>
+   </label>
+   <button type="submit">Search catalog</button>
+  </form>
+  <div class="split" style="margin-bottom:12px">
+   <div id="catalog-count" class="muted">Loading catalog...</div>
+   <div class="actions">
+    <button class="secondary" id="cat-prev" type="button">Prev</button>
+    <span id="cat-page-label" class="muted" style="align-self:center">Page 1</span>
+    <button class="secondary" id="cat-next" type="button">Next</button>
+   </div>
+  </div>
+  <div id="catalog-table" class="loading">Loading catalog items</div>
+ </article>
 </section>
 <section class="view" id="view-operations" data-title="Operations" hidden>
  <div class="view-head"><div><h2>Operations</h2><p>Downloads, pending control tasks, retries, blocks, and autonomy controls.</p></div><div class="actions"><button type="button" id="op-refresh-services">Refresh services</button><button class="secondary" type="button" id="op-reconcile">Reconcile</button><button class="secondary" type="button" id="op-plex-refresh">Request Plex refresh</button></div></div>
@@ -116,7 +145,33 @@ async function loadPlaylists(){const el=document.getElementById('playlists-list'
 function renderPreservation(){const data=state.preservation||{},scan=data.latest_scan||{},summary=scan.summary||{},mounts=data.mounts||[],files=data.files||[],events=data.storage_events||[],integrity=data.database_integrity||{},maintenance=data.maintenance||{};document.getElementById('pres-scan').textContent=scan.finished_at?relativeTime(scan.finished_at):scan.status||'None';document.getElementById('pres-mounts').textContent=`${mounts.filter(m=>m.mounted).length}/${mounts.length}`;document.getElementById('pres-checksums').textContent=fmtNumber((summary.statuses||{}).checksum_mismatch||files.filter(f=>f.status==='checksum_mismatch').length);document.getElementById('pres-events').textContent=fmtNumber(summary.storage_events??events.length);const dbOk=['control','catalog'].every(k=>(integrity[k]||{}).integrity==='ok');document.getElementById('pres-integrity').textContent=dbOk?'OK':'Attention';document.getElementById('pres-backup').textContent=maintenance.status||'Unknown';document.getElementById('pres-mount-table').className='';document.getElementById('pres-mount-table').innerHTML=table(['Mount','State','Filesystem','Free','Error'],mounts.map(m=>`<tr><td>${escapeHtml(m.mount_path)}</td><td>${badge(m.mounted?'available':'missing')}</td><td>${escapeHtml(m.filesystem||'--')}</td><td>${fmtBytes(m.free_bytes)}</td><td>${escapeHtml(m.error||'--')}</td></tr>`));document.getElementById('pres-maintenance').className='';document.getElementById('pres-maintenance').innerHTML=`<div class="stack"><div class="service-row"><span>Preservation scan</span>${badge(scan.status||'unavailable')}</div><div class="service-row"><span>Database maintenance</span>${badge(maintenance.status||'unavailable')}</div><div class="service-row"><span>Control database</span>${badge((integrity.control||{}).integrity)}</div><div class="service-row"><span>Catalog database</span>${badge((integrity.catalog||{}).integrity)}</div><div class="muted">Scan finished ${escapeHtml(relativeTime(scan.finished_at))}. Maintenance finished ${escapeHtml(relativeTime(maintenance.finished_at))}.</div></div>`;document.getElementById('pres-files').className='';document.getElementById('pres-files').innerHTML=table(['Path','State','Size','Checksum','Error'],files.map(f=>`<tr><td>${escapeHtml(f.logical_path)}</td><td>${badge(f.status)}</td><td>${fmtBytes(f.size)}</td><td class="state">${escapeHtml(f.checksum_sha256?`${f.checksum_sha256.slice(0,14)}...`:'Not sampled')}</td><td>${escapeHtml(f.error||'--')}</td></tr>`));const editions=data.editions||[];document.getElementById('pres-editions').className='';document.getElementById('pres-editions').innerHTML=table(['Edition','Source provenance','Authenticity','Rarity','Backup','Updated'],editions.map(e=>`<tr><td>${escapeHtml(e.edition_label)}</td><td>${escapeHtml(e.source_release_name||'Not recorded')}</td><td>${escapeHtml(`${Number(e.authenticity_confidence||0).toFixed(0)}%`)}</td><td>${escapeHtml(e.rarity_flag?'Rare':'Standard')}</td><td>${badge(e.backup_status)}</td><td>${escapeHtml(relativeTime(e.updated_at))}</td></tr>`));}
 async function loadPreservation(force=false){try{if(force||!state.preservation)state.preservation=await apiFetch('/api/preservation?limit=100');renderPreservation();}catch(error){['pres-mount-table','pres-maintenance','pres-files','pres-editions'].forEach(id=>{document.getElementById(id).className='';document.getElementById(id).innerHTML=errorState(error);});}}
 async function loadAnalytics(){for(const id of ['analytics-codecs','analytics-genres']){document.getElementById(id).className='loading';}try{const data=await apiFetch('/api/analytics/summary');document.getElementById('analytics-size').textContent=`${fmtNumber(data.total_size_gb||0)} GB`;for(const [id,values] of [['analytics-codecs',data.codecs||{}],['analytics-genres',data.top_genres||{}]]){const el=document.getElementById(id);el.className='stack';const entries=Object.entries(values);el.innerHTML=entries.length?entries.map(([name,count])=>`<div class="service-row"><span>${escapeHtml(name)}</span><strong>${fmtNumber(count)}</strong></div>`).join(''):empty('No analytics data available.');}}catch(error){['analytics-codecs','analytics-genres'].forEach(id=>{document.getElementById(id).className='';document.getElementById(id).innerHTML=errorState(error);});}}
-function loadView(name,force=false){if(name==='overview')return loadOverview(force);if(name==='operations')return loadOperations(force);if(name==='discovery')return loadDiscovery();if(name==='curation')return loadPlaylists();if(name==='preservation')return loadPreservation(force);if(name==='analytics')return loadAnalytics();}
+let currentCatPage = 1, totalCatPages = 1;
+async function loadCatalog(page = 1) {
+  currentCatPage = page;
+  const form = document.getElementById('catalog-form');
+  const formData = new FormData(form);
+  const q = encodeURIComponent(String(formData.get('q') || '').trim());
+  const genre = encodeURIComponent(String(formData.get('genre') || ''));
+  const mediaType = encodeURIComponent(String(formData.get('media_type') || ''));
+  const el = document.getElementById('catalog-table');
+  el.className = 'loading'; el.textContent = 'Loading catalog items';
+  try {
+    const data = await apiFetch(`/api/catalog?q=${q}&genre=${genre}&media_type=${mediaType}&page=${page}&limit=48`);
+    totalCatPages = data.pages || 1;
+    document.getElementById('catalog-count').textContent = `Total items: ${fmtNumber(data.total)} (${data.items.length} shown)`;
+    document.getElementById('cat-page-label').textContent = `Page ${data.page} of ${totalCatPages}`;
+    el.className = '';
+    const items = data.items || [];
+    el.innerHTML = table(['Type', 'Title', 'Year', 'Genres', 'Overview'], items.map(item => `<tr><td>${badge(item.media_type === 'movie' ? 'movie' : 'series')}</td><td><strong>${escapeHtml(item.title)}</strong></td><td>${escapeHtml(item.year || '--')}</td><td>${(item.genres || []).slice(0, 3).map(g => `<span class="status ok" style="font-size:0.7rem">${escapeHtml(g)}</span>`).join(' ')}</td><td class="muted">${escapeHtml((item.overview || '').slice(0, 120))}${item.overview && item.overview.length > 120 ? '...' : ''}</td></tr>`));
+  } catch (error) {
+    el.className = ''; el.innerHTML = errorState(error);
+  }
+}
+document.getElementById('catalog-form').addEventListener('submit', event => { event.preventDefault(); loadCatalog(1); });
+document.getElementById('cat-prev').addEventListener('click', () => { if (currentCatPage > 1) loadCatalog(currentCatPage - 1); });
+document.getElementById('cat-next').addEventListener('click', () => { if (currentCatPage < totalCatPages) loadCatalog(currentCatPage + 1); });
+
+function loadView(name,force=false){if(name==='overview')return loadOverview(force);if(name==='catalog')return loadCatalog(1);if(name==='operations')return loadOperations(force);if(name==='discovery')return loadDiscovery();if(name==='curation')return loadPlaylists();if(name==='preservation')return loadPreservation(force);if(name==='analytics')return loadAnalytics();}
 async function action(button,url,options,noticeId,after){const notice=document.getElementById(noticeId);button.disabled=true;notice.textContent='Request in progress...';try{const result=await apiFetch(url,options);notice.textContent=result.message||result.status||'Request completed.';if(after)await after(result);}catch(error){notice.innerHTML=errorState(error);}finally{button.disabled=false;}}
 document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>setView(button.dataset.view)));document.querySelectorAll('[data-view-jump]').forEach(button=>button.addEventListener('click',()=>setView(button.dataset.viewJump)));document.getElementById('menu-toggle').addEventListener('click',event=>{const open=document.getElementById('sidebar').classList.toggle('open');event.currentTarget.setAttribute('aria-expanded',String(open));});document.getElementById('refresh-current').addEventListener('click',()=>{const current=document.querySelector('[data-view][aria-current="page"]')?.dataset.view||'overview';loadView(current,true);});
 document.getElementById('op-refresh-services').addEventListener('click',event=>action(event.currentTarget,'/api/refresh',{method:'POST'},'operations-notice',()=>loadOperations(true)));document.getElementById('op-reconcile').addEventListener('click',event=>action(event.currentTarget,'/api/reconcile',{method:'POST'},'operations-notice',()=>loadOperations(true)));document.getElementById('op-plex-refresh').addEventListener('click',event=>action(event.currentTarget,'/api/proposals',{method:'POST',body:JSON.stringify({task_type:'plex_library_refresh',reason:'Dashboard operator request'})},'operations-notice',()=>loadOperations(true)));document.getElementById('emergency-stop').addEventListener('click',event=>{const enabled=event.currentTarget.dataset.enabled==='true';action(event.currentTarget,'/api/autonomous/emergency-stop',{method:'POST',body:JSON.stringify({enabled:!enabled})},'emergency-notice',async()=>{state.autonomy=await apiFetch('/api/autonomous/status');renderAutonomy();});});
@@ -124,6 +179,7 @@ document.addEventListener('click',async event=>{const approve=event.target.close
 document.getElementById('discovery-generate').addEventListener('click',event=>action(event.currentTarget,'/api/discovery/generate',{method:'POST'},'discovery-notice',loadDiscovery));document.getElementById('discovery-franchise').addEventListener('click',event=>action(event.currentTarget,'/api/discovery/franchise',{method:'POST'},'discovery-notice',loadDiscovery));document.getElementById('playlists-refresh').addEventListener('click',loadPlaylists);
 document.getElementById('acquisition-form').addEventListener('submit',async event=>{event.preventDefault();const form=new FormData(event.currentTarget),button=event.submitter,result=document.getElementById('acquisition-result');button.disabled=true;result.textContent='Building a read-only acquisition plan...';try{const plan=await apiFetch('/api/acquisition/plan',{method:'POST',body:JSON.stringify({media_type:String(form.get('media_type')),term:String(form.get('term'))})});state.acquisitionPlan=plan;const candidates=plan.candidates||[],roots=plan.root_folders||[],profiles=plan.quality_profiles||[];if(!candidates.length){result.innerHTML=empty('No acquisition candidates found.');return;}result.innerHTML=`<div class="stack"><label class="field">Storage root<select id="acquisition-root">${roots.map((r,i)=>`<option value="${i}">${escapeHtml(r.path||r.name||`Root ${i+1}`)}</option>`).join('')}</select></label><label class="field">Quality profile<select id="acquisition-profile">${profiles.map((p,i)=>`<option value="${i}">${escapeHtml(p.name||`Profile ${i+1}`)}</option>`).join('')}</select></label>${candidates.map((c,i)=>`<div class="service-row"><span>${escapeHtml(c.title||'Untitled')} ${c.year?`(${escapeHtml(c.year)})`:''}</span><button type="button" data-acquire-index="${i}" ${!roots.length||!profiles.length?'disabled':''}>Propose acquisition</button></div>`).join('')}</div>`;}catch(error){result.innerHTML=errorState(error);}finally{button.disabled=false;}});for(const [id,type] of [['quality-movies','movie'],['quality-series','series']])document.getElementById(id).addEventListener('click',event=>action(event.currentTarget,'/api/quality/analyze',{method:'POST',body:JSON.stringify({media_type:type})},'analysis-result',result=>{document.getElementById('analysis-result').innerHTML=`<div class="result">${escapeHtml(JSON.stringify(result,null,2))}</div>`;}));document.getElementById('health-scan').addEventListener('click',event=>action(event.currentTarget,'/api/health/scan',{method:'POST',body:JSON.stringify({limit:30})},'analysis-result',result=>{document.getElementById('analysis-result').innerHTML=`<div class="result">${escapeHtml(JSON.stringify(result,null,2))}</div>`;}));
 document.getElementById('curation-form').addEventListener('submit',event=>{event.preventDefault();const form=new FormData(event.currentTarget),theme=String(form.get('theme')),mode=String(form.get('mode')),limit=Number(form.get('limit'));const url=mode==='collection'?'/api/plex/collections':'/api/chat',body=mode==='collection'?{theme,limit}:{prompt:`playlist ${theme}`};action(event.submitter,url,{method:'POST',body:JSON.stringify(body)},'curation-result',loadPlaylists);});document.getElementById('watch-form').addEventListener('submit',event=>{event.preventDefault();const form=new FormData(event.currentTarget);action(event.submitter,'/api/watch',{method:'POST',body:JSON.stringify({max_minutes:Number(form.get('max_minutes')),genre:String(form.get('genre'))})},'watch-result',result=>{document.getElementById('watch-result').innerHTML=`<div class="result">${escapeHtml(JSON.stringify(result,null,2))}</div>`;});});document.getElementById('filmography-form').addEventListener('submit',event=>{event.preventDefault();const form=new FormData(event.currentTarget);action(event.submitter,'/api/filmography',{method:'POST',body:JSON.stringify({person:String(form.get('person')),role:String(form.get('role'))})},'filmography-result',result=>{document.getElementById('filmography-result').innerHTML=`<div class="result">${escapeHtml(JSON.stringify(result,null,2))}</div>`;});});document.getElementById('terminal-form').addEventListener('submit',async event=>{event.preventDefault();const input=document.getElementById('terminal-input'),prompt=input.value.trim();if(!prompt)return;const output=document.getElementById('terminal-output');output.insertAdjacentHTML('beforeend',`<div class="terminal-entry"><span class="prompt">operator&gt;</span> ${escapeHtml(prompt)}</div>`);input.value='';event.submitter.disabled=true;try{const result=await apiFetch('/api/chat',{method:'POST',body:JSON.stringify({prompt})});output.insertAdjacentHTML('beforeend',`<div class="terminal-entry"><span class="prompt">cineswarm&gt;</span> ${escapeHtml(typeof result==='string'?result:JSON.stringify(result,null,2))}</div>`);}catch(error){output.insertAdjacentHTML('beforeend',`<div class="terminal-entry error">${escapeHtml(error.message)}</div>`);}finally{event.submitter.disabled=false;output.scrollTop=output.scrollHeight;input.focus();}});
-const initial=location.hash.slice(1);setView(['overview','operations','discovery','curation','preservation','analytics','terminal'].includes(initial)?initial:'overview');
+const initial=location.hash.slice(1);setView(['overview','catalog','operations','discovery','curation','preservation','analytics','terminal'].includes(initial)?initial:'overview');
 </script>
 </body></html>"""
+
