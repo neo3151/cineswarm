@@ -3443,6 +3443,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, self.plane.mesh_engine.get_mesh_status())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path.startswith("/api/chapters/download"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            title = query.get("title", [""])[0]
+            if not title:
+                self._send(400, {"error": "title parameter is required"})
+                return
+            try:
+                summarizer = ChapterSummarizer()
+                res = summarizer.generate(title)
+                vtt_data = res.get("vtt", "").encode("utf-8")
+                clean_title = re.sub(r"[^a-zA-Z0-9_-]", "_", title)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/vtt; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{clean_title}.chapters.vtt"')
+                self.send_header("Content-Length", str(len(vtt_data)))
+                self.end_headers()
+                self.wfile.write(vtt_data)
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
 
 
         elif self.path.startswith("/api/trivia/download"):
