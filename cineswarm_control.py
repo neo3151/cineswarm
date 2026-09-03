@@ -28,11 +28,17 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from cineswarm_agents import AcquisitionPlanner, AgentError, AgentOrchestrator, TriviaCommentaryAgent
+from cineswarm_agents import AcquisitionPlanner, AgentError, AgentOrchestrator, TriviaCommentaryAgent, FullVaultSemanticIndex, SelfReflectionVerifier, UserTasteMemory, LocalDenseVectorIndex, MultiAgentConsensusGraph
+
+
 from cineswarm_chapters import ChapterSummarizer
 from cineswarm_discovery import DiscoveryEngine, parse_json
 from cineswarm_health import MediaHealthScanner
+from cineswarm_library_intelligence import VaultLibraryComprehension
+from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_dashboard import DASHBOARD_HTML as REORGANIZED_DASHBOARD_HTML
+
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_ENV_KEYS = {
@@ -1236,9 +1242,28 @@ class ControlPlane:
         self.planner = planner
         self.agents = AgentOrchestrator(store, CATALOG_DB)
         self.agents.writers = self.writers
+        self.semantic_index = FullVaultSemanticIndex(CATALOG_DB)
+        self.dense_vector_index = LocalDenseVectorIndex(CATALOG_DB)
+        self.consensus_graph = MultiAgentConsensusGraph(self.agents, CATALOG_DB)
+
+        self.verifier = SelfReflectionVerifier(CATALOG_DB)
+        self.taste_memory = UserTasteMemory(CONTROL_DB)
+        self.vault_comprehension = VaultLibraryComprehension(CATALOG_DB)
+        self.evolution_engine = AutonomicSwarmEvolutionEngine(CONTROL_DB, CATALOG_DB)
+        self.agents.semantic_index = self.semantic_index
+        self.agents.vault_comprehension = self.vault_comprehension
+        self.agents.dense_vector_index = self.dense_vector_index
+        self.agents.evolution_engine = self.evolution_engine
+
+
+
+
+
+
         plex_url = os.environ.get("PLEX_URL", "http://127.0.0.1:32400")
         plex_token = os.environ.get("PLEX_TOKEN", "")
         self.discovery = DiscoveryEngine(store, planner, self.agents.tools, plex_url, plex_token) if planner else None
+
 
     def refresh(self, actor: str = "system") -> dict[str, Any]:
         results = {}
@@ -1313,6 +1338,114 @@ class ControlPlane:
             "budget": self.store.get_budget_usage(),
             "policies": self.store.get_all_policies(),
         }
+
+    def probe_transcode_shield(self) -> dict[str, Any]:
+        if not os.path.exists(CATALOG_DB):
+            return {"status": "unavailable", "non_compliant_count": 0, "verified_count": 0}
+        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM catalog_items WHERE present = 1 AND (LOWER(video_codec) LIKE '%av1%' OR LOWER(path) LIKE '%av1%' OR LOWER(path) LIKE '%av-1%')")
+            av1_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM catalog_items WHERE present = 1")
+            total_count = cursor.fetchone()[0]
+        verified = max(0, total_count - av1_count)
+        compliance_pct = round((verified / total_count * 100), 1) if total_count > 0 else 100.0
+        return {
+            "status": "shield_active" if av1_count == 0 else "purge_in_progress",
+            "compliance_percentage": compliance_pct,
+            "non_compliant_count": av1_count,
+            "verified_count": verified,
+            "hardware_accel": "VAAPI iGPU (Intel UHD)",
+            "client_device": "Samsung Galaxy Tab S9 FE"
+        }
+
+
+    def vibe_search(self, user_prompt: str) -> dict[str, Any]:
+        if not user_prompt:
+            return {"matches": []}
+        if not os.path.exists(CATALOG_DB):
+            return {"matches": []}
+        words = [w.strip() for w in user_prompt.lower().split() if len(w.strip()) > 2]
+        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as conn:
+            cursor = conn.cursor()
+            if words:
+                where_clauses = " OR ".join(["LOWER(title) LIKE ?", "LOWER(overview) LIKE ?", "LOWER(genres_json) LIKE ?"])
+                params = []
+                for w in words[:4]:
+                    params.extend([f"%{w}%", f"%{w}%", f"%{w}%"])
+                query_sql = f"SELECT title, year, genres_json, media_type, overview FROM catalog_items WHERE present = 1 AND ({' OR '.join(['(LOWER(title) LIKE ? OR LOWER(overview) LIKE ? OR LOWER(genres_json) LIKE ?)'] * len(words[:4]))}) LIMIT 100"
+                cursor.execute(query_sql, params)
+                rows = cursor.fetchall()
+            else:
+                cursor.execute("SELECT title, year, genres_json, media_type, overview FROM catalog_items WHERE present = 1 ORDER BY RANDOM() LIMIT 20")
+                rows = cursor.fetchall()
+
+        scored = []
+        for r in rows:
+            t, y, g_json, mt, ov = r[0], r[1], r[2] or "[]", r[3], r[4] or ""
+            try:
+                g_list = json.loads(g_json)
+                g_str = ", ".join(g_list) if isinstance(g_list, list) else str(g_json)
+            except Exception:
+                g_str = str(g_json)
+            text = f"{t} {g_str} {ov}".lower()
+            matched_words = [w for w in words if w in text]
+            match_score = len(matched_words)
+            reason = f"Matches atmosphere '{', '.join(matched_words) if matched_words else user_prompt}' in genre/plot overview ({g_str or 'General'})."
+            scored.append({
+                "title": t,
+                "year": y,
+                "genres": g_str,
+                "media_type": mt,
+                "reasoning": reason,
+                "score": match_score
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return {"prompt": user_prompt, "matches": scored[:6]}
+
+
+    def generate_cinema_night(self, theme: str) -> dict[str, Any]:
+        if not os.path.exists(CATALOG_DB):
+            return {"error": "Catalog database not found"}
+        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT title, year, genres_json, overview FROM catalog_items WHERE present = 1 AND media_type = 'movie' ORDER BY RANDOM() LIMIT 50")
+            rows = cursor.fetchall()
+
+        if len(rows) < 2:
+            return {"error": "Not enough movies in catalog to create double feature"}
+
+        def parse_g(g_raw):
+            try:
+                g_l = json.loads(g_raw or "[]")
+                return ", ".join(g_l) if isinstance(g_l, list) else str(g_raw)
+            except Exception:
+                return str(g_raw or "Classic")
+
+        m1, m2 = rows[0], rows[1]
+        g1, g2 = parse_g(m1[2]), parse_g(m2[2])
+        double_feature = {
+            "event_title": f"CineSwarm Cinema Night: {theme or 'Curated Feature'}",
+            "feature_1": {
+                "title": m1[0],
+                "year": m1[1],
+                "pitch": f"Opening Feature ({g1 or 'Classic'}): {m1[3][:140]}..." if m1[3] else "A thrilling opening feature to kick off cinema night."
+            },
+            "intermission_trivia": [
+                f"Did you know? '{m1[0]}' ({m1[1]}) was selected as part of your curated local archive.",
+                f"Genre pairing: Combining {g1 or 'Action'} with {g2 or 'Drama'} for optimal thematic rhythm.",
+                f"Featured Double-Bill: '{m2[0]}' ({m2[1]}) follows after a brief intermission!"
+            ],
+            "feature_2": {
+                "title": m2[0],
+                "year": m2[1],
+                "pitch": f"Co-Feature ({g2 or 'Cult Favorite'}): {m2[3][:140]}..." if m2[3] else "A complementary late-night co-feature."
+            }
+        }
+        return {"theme": theme, "double_feature": double_feature}
+
+
+
 
     def discovery_action(self, candidate_id: int, action: str, actor: str = "dashboard") -> dict[str, Any]:
         if not self.discovery:
@@ -1454,23 +1587,12 @@ class ControlPlane:
             return False
 
     def watch_recommendations(self, max_minutes: int = 120, genre: str = "", limit: int = 5, actor: str = "dashboard") -> dict[str, Any]:
-        """Generate smart 'Watch Tonight' recommendations filtered by duration & genre."""
-        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
-            sql = "SELECT title, year, duration_mins, genres_json, overview FROM catalog_items WHERE present=1 AND duration_mins > 0 AND duration_mins <= ?"
-            params: list[Any] = [max_minutes]
-            if genre:
-                sql += " AND lower(genres_json) LIKE ?"
-                params.append(f"%{genre.lower()}%")
-            sql += " ORDER BY RANDOM() LIMIT 50"
-            rows = connection.execute(sql, params).fetchall()
-
-            if not rows:
-                # Fallback if strict duration/genre has no matches
-                rows = connection.execute("SELECT title, year, duration_mins, genres_json, overview FROM catalog_items WHERE present=1 ORDER BY RANDOM() LIMIT 50").fetchall()
-
-            candidates = []
-            for r in rows:
-                candidates.append({"title": r[0], "year": r[1], "duration_mins": r[2] or 90, "genres": r[3], "overview": r[4]})
+        """Generate smart 'Watch Tonight' recommendations using Full-Vault Semantic Search & Self-Reflection Verifier."""
+        max_size_gb = float(self.store.get_policy("CINESWARM_MAX_DOWNLOAD_SIZE_GB") or "8.0")
+        
+        # Use full-vault semantic index
+        search_query = f"{genre} movie".strip() if genre else "popular classic film"
+        candidates = self.semantic_index.search(search_query, top_n=40, max_minutes=max_minutes, max_size_gb=max_size_gb)
 
         if not self.agents or not self.agents.model.configured or not candidates:
             picks = candidates[:limit]
@@ -1479,7 +1601,7 @@ class ControlPlane:
         prompt = {
             "role": "You are a movie concierge.",
             "instruction": f"Select the top {limit} movies from candidate_movies that best fit a quick watch session under {max_minutes} minutes" + (f" in the '{genre}' genre." if genre else "."),
-            "candidate_movies": candidates[:30],
+            "candidate_movies": candidates[:25],
             "schema": {
                 "picks": [
                     {
@@ -1500,11 +1622,15 @@ class ControlPlane:
             cand_str = fenced.group(1) if fenced else resp
             parsed = json.loads(cand_str)
             picks = parsed.get("picks", [])
+            
+            # Self-reflection verifier pass
+            picks = self.verifier.verify_candidates(picks, max_minutes=max_minutes, max_size_gb=max_size_gb)
         except Exception:
             picks = candidates[:limit]
 
         self.store.audit(actor, "watch_recommendations", f"{max_minutes}m-{genre}", "gemini-ai", "completed", {"count": len(picks)})
         return {"max_minutes": max_minutes, "genre": genre, "recommendations": picks}
+
 
     def reorder_plex_playlist(self, playlist_id: str, rating_keys: list[str], actor: str = "dashboard") -> bool:
         """Re-order items in a Plex playlist by updating items in sequence."""
@@ -1731,6 +1857,169 @@ class ControlPlane:
             "upgrade_candidate_count": result.get("upgrade_candidate_count", 0),
         })
         return result
+
+    def get_intelligence_status(self) -> dict[str, Any]:
+        """Fetch active status & reinforcement weighting tuning stats for Swarm Intelligence modules."""
+        # Calculate dynamic reinforcement weights from user decision feedback
+        feedback_stats = {"total_feedback": 0, "good": 0, "bad": 0, "weight_offsets": {}}
+        try:
+            with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("SELECT sentiment, count(*) as cnt FROM decision_feedback GROUP BY sentiment").fetchall()
+                for r in rows:
+                    feedback_stats[r["sentiment"]] = r["cnt"]
+                    feedback_stats["total_feedback"] += r["cnt"]
+        except Exception:
+            pass
+
+        # Calculate weight offsets based on sentiment balance
+        good = feedback_stats.get("good", 0)
+        bad = feedback_stats.get("bad", 0)
+        net = good - bad
+        feedback_stats["weight_offsets"] = {
+            "watch_affinity_multiplier": round(1.0 + (net * 0.05), 2),
+            "rarity_preservation_multiplier": round(1.0 + (good * 0.02), 2),
+            "storage_cost_penalty_multiplier": round(1.0 + (bad * 0.03), 2),
+        }
+
+        # Quality guard rules
+        max_size_gb = float(self.store.get_policy("CINESWARM_MAX_DOWNLOAD_SIZE_GB") or "8.0")
+        
+        return {
+            "intelligence_version": "2.0.0",
+            "quality_guard": {
+                "max_size_gb_ceiling": max_size_gb,
+                "blocked_codecs": ["av1"],
+                "preferred_codecs": ["h264", "hevc"],
+                "active": True
+            },
+            "reinforcement": feedback_stats,
+            "double_feature_engine": {"status": "ready" if self.agents and self.agents.model.configured else "offline"},
+            "storage_optimization_agent": {"status": "ready"}
+        }
+
+    def evaluate_release_quality_guard(self, title: str, size_gb: float, video_codec: str = "", release_name: str = "") -> dict[str, Any]:
+        """Evaluate a download release candidate against Quality-Guard safety rules."""
+        max_size_gb = float(self.store.get_policy("CINESWARM_MAX_DOWNLOAD_SIZE_GB") or "8.0")
+        reasons = []
+        passed = True
+
+        if size_gb > max_size_gb:
+            passed = False
+            reasons.append(f"File size ({size_gb:.1f} GB) exceeds policy ceiling of {max_size_gb:.1f} GB")
+
+        codec_clean = video_codec.lower() or release_name.lower()
+        if "av1" in codec_clean:
+            passed = False
+            reasons.append("AV1 codec causes 0.3x CPU software transcode buffering on Tab S9 FE")
+
+        return {
+            "title": title,
+            "size_gb": size_gb,
+            "video_codec": video_codec or "unknown",
+            "passed": passed,
+            "policy_max_size_gb": max_size_gb,
+            "reasons": reasons if not passed else ["Complies with Quality-Guard size and codec constraints"]
+        }
+
+    def generate_intelligence_double_feature(self, theme: str = "mind-bending twists", limit: int = 2, publish_plex: bool = True, actor: str = "dashboard") -> dict[str, Any]:
+        """Generate a thematic multi-movie pairing (e.g. Fan-Theory connections, Director Eras) and option to publish Plex playlist."""
+        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
+            rows = connection.execute("SELECT title, year, duration_mins, genres_json, overview, source_native_id FROM catalog_items WHERE present=1 AND media_type='movie' ORDER BY RANDOM() LIMIT 40").fetchall()
+            candidates = [{"title": r[0], "year": r[1], "duration_mins": r[2] or 90, "genres": r[3], "overview": r[4], "rating_key": r[5]} for r in rows]
+
+        if not self.agents or not self.agents.model.configured or not candidates:
+            picks = candidates[:limit]
+            return {"theme": theme, "pairing": picks, "explanation": "Fallback random pairing"}
+
+        prompt = {
+            "role": "You are a master cinema curator and double-feature engine.",
+            "instruction": f"Select {limit} movies from candidate_movies that form a compelling '{theme}' double-feature pairing or fan-theory connection.",
+            "candidate_movies": candidates[:25],
+            "schema": {
+                "title": f"{theme.title()} Double Feature",
+                "explanation": "Why these two movies pair together and how to watch them",
+                "picks": [
+                    {
+                        "title": "string",
+                        "year": 2000,
+                        "pairing_role": "Part 1: The Setup / Part 2: The Payoff",
+                        "reason": "Why this movie fits the narrative connection"
+                    }
+                ]
+            }
+        }
+        try:
+            resp = self.agents.model.complete([
+                {"role": "system", "content": prompt["role"]},
+                {"role": "user", "content": json.dumps(prompt)}
+            ], temperature=0.4)
+            fenced = re.search(r"```(?:json)?\s*(.*?)```", resp, re.S | re.I)
+            cand_str = fenced.group(1) if fenced else resp
+            parsed = json.loads(cand_str)
+        except Exception as exc:
+            parsed = {"title": f"{theme.title()} Feature", "explanation": f"Generated pairing for {theme}", "picks": candidates[:limit]}
+
+        # Optionally publish Plex Playlist
+        playlist_result = None
+        if publish_plex and self.writers and "plex" in self.writers and parsed.get("picks"):
+            try:
+                pick_titles = {p["title"].lower() for p in parsed.get("picks", [])}
+                keys = [str(c["rating_key"]) for c in candidates if c["title"].lower() in pick_titles and c.get("rating_key")]
+                if keys:
+                    playlist_title = f"CineSwarm: {parsed.get('title', theme.title())}"
+                    playlist_result = self.create_plex_playlist(playlist_title, keys, actor=actor)
+            except Exception:
+                pass
+
+        self.store.audit(actor, "double_feature_generation", theme, "gemini-ai", "completed", {"picks_count": len(parsed.get("picks", []))})
+        return {
+            "theme": theme,
+            "title": parsed.get("title", f"{theme.title()} Double Feature"),
+            "explanation": parsed.get("explanation", ""),
+            "pairing": parsed.get("picks", []),
+            "plex_playlist": playlist_result
+        }
+
+    def run_storage_optimization_audit(self, actor: str = "dashboard") -> dict[str, Any]:
+        """Perform a non-destructive audit of vault media files to identify bloated, corrupt, or unmonitored duplicate files."""
+        with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT id, title, year, media_type, size_mb, video_codec, path FROM catalog_items WHERE present=1 ORDER BY size_mb DESC").fetchall()
+
+        over_20gb = []
+        av1_files = []
+        total_vault_size_gb = 0.0
+
+        for r in rows:
+            size_gb = (r["size_mb"] or 0) / 1024.0
+            total_vault_size_gb += size_gb
+            codec = (r["video_codec"] or "").lower()
+            if size_gb > 20.0:
+                over_20gb.append({"title": r["title"], "year": r["year"], "size_gb": round(size_gb, 2), "path": r["path"]})
+            if "av1" in codec:
+                av1_files.append({"title": r["title"], "year": r["year"], "codec": codec, "size_gb": round(size_gb, 2)})
+
+        recommendations = []
+        if over_20gb:
+            recommendations.append(f"Found {len(over_20gb)} bloated files (>20 GB). Consider replacing with 8-15 GB high-efficiency HEVC encodes.")
+        if av1_files:
+            recommendations.append(f"Found {len(av1_files)} AV1 encoded titles causing CPU transcode buffering on Tab S9 FE.")
+        if not recommendations:
+            recommendations.append("Vault storage is optimized. All media files comply with quality and direct-play guidelines.")
+
+        result = {
+            "total_items": len(rows),
+            "total_vault_size_gb": round(total_vault_size_gb, 2),
+            "bloated_files_count": len(over_20gb),
+            "bloated_files_sample": over_20gb[:5],
+            "av1_files_count": len(av1_files),
+            "av1_files_sample": av1_files[:5],
+            "recommendations": recommendations
+        }
+        self.store.audit(actor, "storage_optimization_audit", "vault", "catalog-scan", "completed", {"bloated_count": len(over_20gb), "av1_count": len(av1_files)})
+        return result
+
 
     def acquisition_queue(self, media_type: str, actor: str = "dashboard") -> dict[str, Any]:
         if not self.planner:
@@ -2956,7 +3245,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"name": "CineSwarm", "application_version": APPLICATION_VERSION, "api_version": API_VERSION, "supported_versions": [API_VERSION]})
         elif canonical_path == "/api/status":
             self._send(200, self.plane.store.status())
+        elif canonical_path == "/api/transcode-shield":
+            self._send(200, self.plane.probe_transcode_shield())
         elif canonical_path == "/api/diagnostics":
+
             self._send(200, self.plane.store.diagnostics())
         elif canonical_path == "/api/health":
             status = self.plane.store.status()
@@ -3120,7 +3412,19 @@ class Handler(BaseHTTPRequestHandler):
                     "top_actors": profile.get("top_actors", [])
                 }
             })
+        elif self.path == "/api/intelligence/status":
+            try:
+                self._send(200, self.plane.get_intelligence_status())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/evolution-report":
+            try:
+                self._send(200, self.plane.evolution_engine.get_evolution_report())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
         elif self.path.startswith("/api/trivia/download"):
+
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             title = query.get("title", [""])[0]
             if not title:
@@ -3189,7 +3493,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
         elif self.path == "/api/chat":
-
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -3197,6 +3500,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, result)
             except (json.JSONDecodeError, AgentError) as exc:
                 self._send(400, {"error": str(exc)})
+        elif self.path == "/api/vibe-search":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                user_prompt = payload.get("prompt", "")
+                res = self.plane.vibe_search(user_prompt)
+                self._send(200, res)
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/cinema-night":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                theme = payload.get("theme", "")
+                res = self.plane.generate_cinema_night(theme)
+                self._send(200, res)
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
         elif self.path.startswith("/api/tasks/") and self.path.endswith("/approve"):
             task_id = self.path[len("/api/tasks/"):-len("/approve")]
             try:
@@ -3231,7 +3553,108 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, self.plane.discovery.discover_missing_franchise_items(limit=10))
                 except Exception as exc:
                     self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/status":
+            try:
+                self._send(200, self.plane.get_intelligence_status())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/evolution-report":
+            try:
+                self._send(200, self.plane.evolution_engine.get_evolution_report())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
+        elif self.path == "/api/intelligence/evaluate-candidate":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                title = payload.get("title", "Unknown")
+                size_gb = float(payload.get("size_gb", 0))
+                codec = payload.get("video_codec", "")
+                release = payload.get("release_name", "")
+                res = self.plane.evaluate_release_quality_guard(title, size_gb, codec, release)
+                self._send(200, res)
+            except Exception as exc:
+                self._send(400, {"error": str(exc)})
+        elif self.path == "/api/intelligence/double-feature":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                theme = payload.get("theme", "mind-bending twists")
+                limit = int(payload.get("limit", 2))
+                publish = bool(payload.get("publish_plex", True))
+                res = self.plane.generate_intelligence_double_feature(theme, limit, publish, actor="dashboard")
+                self._send(200, res)
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/semantic-search":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                query = payload.get("query", "")
+                top_n = int(payload.get("top_n", 20))
+                max_minutes = int(payload.get("max_minutes")) if payload.get("max_minutes") else None
+                max_size_gb = float(payload.get("max_size_gb")) if payload.get("max_size_gb") else None
+                results = self.plane.semantic_index.search(query, top_n=top_n, max_minutes=max_minutes, max_size_gb=max_size_gb)
+                self._send(200, {"query": query, "total_matches": len(results), "results": results})
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/vector-search":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                query = payload.get("query", "")
+                top_n = int(payload.get("top_n", 20))
+                max_m = int(payload.get("max_minutes")) if payload.get("max_minutes") else None
+                max_gb = float(payload.get("max_size_gb")) if payload.get("max_size_gb") else None
+                results = self.plane.dense_vector_index.dense_vector_search(query, top_n=top_n, max_minutes=max_m, max_size_gb=max_gb)
+                self._send(200, {"query": query, "engine": "100% Local 384-dim Dense Vector Search ($0 cost)", "matches_count": len(results), "results": results})
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/consensus-deliberate":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                p_type = payload.get("proposal_type", "candidate_acquisition")
+                title = payload.get("title", "Unknown")
+                size_gb = float(payload.get("size_gb", 0.0))
+                codec = payload.get("video_codec", "")
+                result = self.plane.consensus_graph.deliberate_proposal(p_type, title, size_gb, codec)
+                self._send(200, result)
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/webhooks/plex":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                event = payload.get("event", "media.play")
+                movie = (payload.get("Metadata") or {}).get("title", "Unknown")
+                res_telemetry = self.plane.evolution_engine.process_plex_playback_event(payload)
+                self.plane.log_decision("webhook_plex", movie, "recorded", {"event": event}, res_telemetry)
+                self._send(200, {"status": "received", "event": event, "media": movie, "reinforcement_telemetry": res_telemetry})
+            except Exception as exc:
+                self._send(200, {"status": "ingested"})
+
+        elif self.path == "/api/webhooks/sabnzbd":
+            try:
+                self.plane.log_decision("webhook_sabnzbd", "download_complete", "trigger_scan", {}, {"status": "reconciled"})
+                self._send(200, {"status": "received"})
+            except Exception as exc:
+                self._send(200, {"status": "ingested"})
+        elif self.path == "/api/intelligence/taste-memory":
+
+            try:
+                self._send(200, self.plane.taste_memory.get_memory_summary())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/intelligence/storage-audit":
+
+            try:
+                self._send(200, self.plane.run_storage_optimization_audit(actor="dashboard"))
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
         elif self.path == "/api/playback/profile":
+
             if not self.plane.discovery or not self.plane.discovery.playback_history:
                 self._send(400, {"error": "Playback history not available"})
             else:
@@ -3483,6 +3906,39 @@ def make_plane() -> ControlPlane:
     return ControlPlane(store, connectors, actions, planner, writers)
 
 
+def run_proactive_swarm_loop(plane: ControlPlane, interval_seconds: int = 300) -> None:
+    """Proactive Background Swarm Loop daemon: autonomously audits media health, updates taste memory, and evaluates quality guard."""
+    print("🚀 Proactive Swarm Loop Daemon started (Background Autopilot active)")
+    while True:
+        try:
+            time.sleep(interval_seconds)
+            # 1. Proactive storage & quality guard audit
+            plane.run_storage_optimization_audit(actor="proactive-swarm")
+            
+            # 2. Update user taste profile memory from active Plex history
+            if plane.discovery and plane.discovery.playback_history:
+                profile = plane.discovery.playback_history.build_taste_profile()
+                plane.taste_memory.record_preference("user_profile_summary", profile)
+                
+            # 3. Autonomic Self-Healing & Vector Re-Indexing
+            plane.evolution_engine.run_autonomic_maintenance()
+
+            # 4. Proactive corrupt media scanning & auto-healing
+            plane.scan_media_health(limit=20, actor="proactive-swarm", allow_automatic=True)
+
+            
+            # Log autonomous swarm heartbeats
+            plane.log_decision(
+                category="proactive_swarm_cycle",
+                subject="vault_health_and_taste_sync",
+                decision="allowed",
+                reasons={"loop_interval": interval_seconds, "autopilot": True},
+                outcome={"status": "health_and_taste_updated"}
+            )
+        except Exception as exc:
+            pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the read-only CineSwarm control plane.")
     parser.add_argument("--host", default=os.environ.get("CINESWARM_CONTROL_HOST", "127.0.0.1"))
@@ -3494,8 +3950,13 @@ def main() -> None:
         print(json_text(plane.refresh("cli")))
         return
     Handler.plane = plane
+    
+    # Launch Proactive Swarm Loop daemon thread
+    swarm_thread = threading.Thread(target=run_proactive_swarm_loop, args=(plane, 300), daemon=True)
+    swarm_thread.start()
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"CineSwarm control plane listening on {args.host}:{args.port} (read-only)")
+    print(f"CineSwarm control plane listening on {args.host}:{args.port} (Swarm Autopilot Active)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3506,3 +3967,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

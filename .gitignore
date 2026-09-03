@@ -22,10 +22,17 @@ ENV/
 
 # Temporary / Generated Reports & Data
 *.pdf
-report_temp.html
+*_temp.html
 LATEST_VAULT_ADDITIONS.md
+*.log
+*.png
+*.svg
+demo_vault/
+generate_*_pdf.py
+generate_svg_charts.py
 
 # OS & Editor files
 .DS_Store
 .vscode/
 .idea/
+
