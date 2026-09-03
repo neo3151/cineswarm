@@ -36,7 +36,10 @@ from cineswarm_discovery import DiscoveryEngine, parse_json
 from cineswarm_health import MediaHealthScanner
 from cineswarm_library_intelligence import VaultLibraryComprehension
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
+from cineswarm_user_profiles import MultiUserTasteEngine
+from cineswarm_mesh import SwarmMeshSyncEngine
 from cineswarm_dashboard import DASHBOARD_HTML as REORGANIZED_DASHBOARD_HTML
+
 
 
 
@@ -1250,10 +1253,15 @@ class ControlPlane:
         self.taste_memory = UserTasteMemory(CONTROL_DB)
         self.vault_comprehension = VaultLibraryComprehension(CATALOG_DB)
         self.evolution_engine = AutonomicSwarmEvolutionEngine(CONTROL_DB, CATALOG_DB)
+        self.user_profiles = MultiUserTasteEngine(CONTROL_DB)
+        self.mesh_engine = SwarmMeshSyncEngine(CONTROL_DB)
+        self.agents.user_profiles = self.user_profiles
         self.agents.semantic_index = self.semantic_index
         self.agents.vault_comprehension = self.vault_comprehension
         self.agents.dense_vector_index = self.dense_vector_index
         self.agents.evolution_engine = self.evolution_engine
+
+
 
 
 
@@ -3422,6 +3430,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, self.plane.evolution_engine.get_evolution_report())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path == "/api/user/profiles":
+            try:
+                self._send(200, {
+                    "active_profile": self.plane.user_profiles.get_active_profile(),
+                    "all_profiles": self.plane.user_profiles.list_all_profiles()
+                })
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path == "/api/mesh/status":
+            try:
+                self._send(200, self.plane.mesh_engine.get_mesh_status())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
 
         elif self.path.startswith("/api/trivia/download"):
 
@@ -3611,7 +3633,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"query": query, "engine": "100% Local 384-dim Dense Vector Search ($0 cost)", "matches_count": len(results), "results": results})
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path == "/api/user/switch-profile":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                p_id = payload.get("profile_id", "admin")
+                self._send(200, self.plane.user_profiles.switch_active_profile(p_id))
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
         elif self.path == "/api/intelligence/consensus-deliberate":
+
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
