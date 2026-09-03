@@ -39,7 +39,9 @@ from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_user_profiles import MultiUserTasteEngine
 from cineswarm_mesh import SwarmMeshSyncEngine
 from cineswarm_artwork import DynamicArtworkEngine
+from cineswarm_fleet import EnterpriseFleetManager
 from cineswarm_dashboard import DASHBOARD_HTML as REORGANIZED_DASHBOARD_HTML
+
 
 
 
@@ -1258,7 +1260,9 @@ class ControlPlane:
         self.user_profiles = MultiUserTasteEngine(CONTROL_DB)
         self.mesh_engine = SwarmMeshSyncEngine(CONTROL_DB)
         self.artwork_engine = DynamicArtworkEngine()
+        self.fleet_manager = EnterpriseFleetManager(CONTROL_DB)
         self.agents.user_profiles = self.user_profiles
+
 
         self.agents.semantic_index = self.semantic_index
         self.agents.vault_comprehension = self.vault_comprehension
@@ -3447,6 +3451,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, self.plane.mesh_engine.get_mesh_status())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path == "/api/enterprise/fleet":
+            try:
+                self._send(200, self.plane.fleet_manager.get_fleet_summary())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+
         elif self.path.startswith("/api/artwork/banner.svg"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             title = query.get("title", ["CineSwarm Special Collection"])[0]
@@ -3622,7 +3632,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
 
+        elif self.path == "/api/enterprise/register-tenant":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                t_id = payload.get("tenant_id", "tenant_01")
+                t_name = payload.get("tenant_name", "Grand Luxury Resort")
+                p_type = payload.get("property_type", "Boutique Hotel")
+                endpoints = int(payload.get("total_endpoints", 20))
+                sla = payload.get("sla_tier", "Enterprise")
+                self._send(200, self.plane.fleet_manager.register_tenant(t_id, t_name, p_type, endpoints, sla))
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
         elif self.path == "/api/intelligence/evaluate-candidate":
+
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length) or b"{}")
