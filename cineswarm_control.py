@@ -38,7 +38,9 @@ from cineswarm_library_intelligence import VaultLibraryComprehension
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_user_profiles import MultiUserTasteEngine
 from cineswarm_mesh import SwarmMeshSyncEngine
+from cineswarm_artwork import DynamicArtworkEngine
 from cineswarm_dashboard import DASHBOARD_HTML as REORGANIZED_DASHBOARD_HTML
+
 
 
 
@@ -1255,7 +1257,9 @@ class ControlPlane:
         self.evolution_engine = AutonomicSwarmEvolutionEngine(CONTROL_DB, CATALOG_DB)
         self.user_profiles = MultiUserTasteEngine(CONTROL_DB)
         self.mesh_engine = SwarmMeshSyncEngine(CONTROL_DB)
+        self.artwork_engine = DynamicArtworkEngine()
         self.agents.user_profiles = self.user_profiles
+
         self.agents.semantic_index = self.semantic_index
         self.agents.vault_comprehension = self.vault_comprehension
         self.agents.dense_vector_index = self.dense_vector_index
@@ -3443,6 +3447,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, self.plane.mesh_engine.get_mesh_status())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path.startswith("/api/artwork/banner.svg"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            title = query.get("title", ["CineSwarm Special Collection"])[0]
+            theme = query.get("theme", ["default"])[0]
+            movies = query.get("movies", [""])[0].split(",") if query.get("movies", [""])[0] else []
+            svg_data = self.plane.artwork_engine.generate_svg_banner(title, theme, movies).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(svg_data)))
+            self.end_headers()
+            self.wfile.write(svg_data)
+
         elif self.path.startswith("/api/chapters/download"):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             title = query.get("title", [""])[0]
