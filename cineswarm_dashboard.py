@@ -151,8 +151,29 @@ DASHBOARD_HTML = r"""<!doctype html>
   </article>
  </div>
 
+ <article class="card" style="margin-bottom:14px">
+  <div class="split">
+   <h3>👨‍👩‍👧‍👦 User Family Profiles & Content Governance</h3>
+   <span class="status ok" id="active-profile-badge">Active: Primary Admin</span>
+  </div>
+  <p class="muted">Manage user profiles, rating ceilings (PG-13, R, NC-17), and per-profile taste weights.</p>
+  <div class="form-row" style="margin-top:10px; align-items:flex-end">
+   <label class="field" style="flex:1">Switch Active Family User Profile:
+    <select id="user-profile-select">
+     <option value="admin">👤 Primary Admin (NC-17)</option>
+     <option value="partner">👥 Partner (R)</option>
+     <option value="kids">👶 Kids Zone (PG-13 Safety Cap)</option>
+     <option value="guest">🍸 Guest Lounge (R)</option>
+    </select>
+   </label>
+   <button type="button" id="switch-profile-btn">Switch Profile</button>
+  </div>
+  <div id="profile-result" class="notice" style="margin-top:10px" role="status"></div>
+ </article>
+
  <div class="grid two" style="margin-top:14px">
   <article class="card">
+
    <h3>🎨 Collection & Playlist Curator</h3>
    <p class="muted">Automatically group vault items into a Plex Collection or Playlist.</p>
    <form id="curation-form">
@@ -376,8 +397,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  document.getElementById('switch-profile-btn')?.addEventListener('click', async (e) => {
+    const sel = document.getElementById('user-profile-select').value;
+    action(e.currentTarget, '/api/user/switch-profile', { method: 'POST', body: JSON.stringify({ profile_id: sel }) }, 'profile-result', async res => {
+      document.getElementById('active-profile-badge').textContent = `Active: ${sel.toUpperCase()}`;
+      document.getElementById('profile-result').innerHTML = `<div class="notice ok">Switched active family profile to <strong>${escapeHtml(sel)}</strong>. Content rating safety filters and taste weights updated.</div>`;
+    });
+  });
 
 });
+
 
 
 async function loadIntelligence() {
