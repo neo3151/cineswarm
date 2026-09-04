@@ -1835,6 +1835,51 @@ class ControlPlane:
         res["auto_heal_tasks"] = auto_heal_tasks
         return res
 
+    def run_x265_upgrade_sweep(self, batch_size: int = 100, actor: str = "autonomic") -> dict[str, Any]:
+        """Trigger aggressive x265/HEVC upgrade search batch across Radarr and Sonarr Cutoff Unmet queues."""
+        sonarr_url = os.environ.get("SONARR_URL", "http://127.0.0.1:8989")
+        sonarr_api = os.environ.get("SONARR_API_KEY", "")
+        radarr_url = os.environ.get("RADARR_URL", "http://127.0.0.1:7878")
+        radarr_api = os.environ.get("RADARR_API_KEY", "")
+
+        movie_count = 0
+        episode_count = 0
+        half_batch = max(1, batch_size // 2)
+
+        # Radarr Cutoff Unmet
+        if radarr_api:
+            try:
+                r_cutoff = requests.get(f"{radarr_url}/api/v3/wanted/cutoff", headers={"X-Api-Key": radarr_api}, params={"pageSize": half_batch, "sortKey": "movie.added", "sortDirection": "descending"}, timeout=10).json()
+                movie_records = r_cutoff.get("records", [])
+                movie_ids = [m.get("id") for m in movie_records if m.get("id")]
+                if movie_ids:
+                    requests.post(f"{radarr_url}/api/v3/command", headers={"X-Api-Key": radarr_api}, json={"name": "MoviesSearch", "movieIds": movie_ids}, timeout=10)
+                    movie_count = len(movie_ids)
+            except Exception as e:
+                logger.warning(f"x265 Radarr upgrade sweep failed: {e}")
+
+        # Sonarr Cutoff Unmet
+        if sonarr_api:
+            try:
+                s_cutoff = requests.get(f"{sonarr_url}/api/v3/wanted/cutoff", headers={"X-Api-Key": sonarr_api}, params={"pageSize": half_batch, "sortKey": "series.title", "sortDirection": "ascending"}, timeout=10).json()
+                ep_records = s_cutoff.get("records", [])
+                episode_ids = [e.get("id") for e in ep_records if e.get("id")]
+                if episode_ids:
+                    requests.post(f"{sonarr_url}/api/v3/command", headers={"X-Api-Key": sonarr_api}, json={"name": "EpisodeSearch", "episodeIds": episode_ids}, timeout=10)
+                    episode_count = len(episode_ids)
+            except Exception as e:
+                logger.warning(f"x265 Sonarr upgrade sweep failed: {e}")
+
+        result = {
+            "status": "triggered",
+            "batch_size": batch_size,
+            "movies_queued": movie_count,
+            "episodes_queued": episode_count,
+            "timestamp": timestamp()
+        }
+        self.store.audit(actor, "x265_upgrade_sweep", "autonomic", "radarr_sonarr", "completed", result)
+        return result
+
     def generate_movie_chapters(self, title: str, year: int | None = None, actor: str = "dashboard") -> dict[str, Any]:
         """Generate AI Chapter Markers & Scene Summaries and auto-inject into movie folder."""
         summarizer = ChapterSummarizer(self.agents.model if self.agents else None)
@@ -3517,6 +3562,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.plane.refresh("dashboard"))
         elif self.path == "/api/reconcile":
             self._send(200, self.plane.reconcile("dashboard"))
+        elif self.path == "/api/x265/upgrade":
+            self._send(200, self.plane.run_x265_upgrade_sweep(batch_size=100, actor="dashboard"))
         elif self.path == "/api/gem/action":
             length = int(self.headers.get("Content-Length", "0"))
             try:
