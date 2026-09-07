@@ -75,6 +75,47 @@ class PlexTests(unittest.TestCase):
         self.assertEqual(profile["top_genres"], [("Drama", 2)])
 
 
+
+    def test_refresh_libraries_refreshes_matching_and_falls_back(self):
+        from cineswarm_control import PlexWriteClient, ServiceConfig
+
+        calls = []
+
+        class FakeWriter(PlexWriteClient):
+            def __init__(self):
+                self.config = ServiceConfig(name="plex", url="http://plex", api_key="t", header="X-Plex-Token")
+                self.timeout = 1
+
+            def get(self, path, params=None):
+                root = ET.Element("MediaContainer")
+                movie = ET.SubElement(root, "Directory", key="1", title="Flix", type="movie")
+                ET.SubElement(movie, "Location", path="/data/Movies")
+                show = ET.SubElement(root, "Directory", key="2", title="Shows", type="show")
+                ET.SubElement(show, "Location", path="/data/TV")
+                return root
+
+            def post(self, path, params=None):
+                calls.append(path)
+                return ET.Element("MediaContainer")
+
+        writer = FakeWriter()
+        matched = writer.refresh_libraries("/data/Movies/Foo (2020)")
+        self.assertEqual(matched["refreshed_count"], 1)
+        self.assertEqual(calls, ["library/sections/1/refresh"])
+
+        calls.clear()
+        fallback = writer.refresh_libraries("/media/Movies/Foo (2020)")
+        self.assertEqual(fallback["refreshed_count"], 2)
+        self.assertEqual(
+            calls,
+            ["library/sections/1/refresh", "library/sections/2/refresh"],
+        )
+
+        calls.clear()
+        all_sections = writer.refresh_libraries(None)
+        self.assertEqual(all_sections["refreshed_count"], 2)
+
+
 class AcquisitionPlannerTests(unittest.TestCase):
     def test_list_shaped_service_errors_are_preserved(self):
         message = service_error_message([{"errorMessage": "Movie already exists"}, {"message": "Duplicate TMDB ID"}])
