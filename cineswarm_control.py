@@ -408,6 +408,65 @@ class PlexWriteClient(PlexApiClient):
         except Exception:
             return False
 
+    def refresh_libraries(self, path: str | None = None) -> dict[str, Any]:
+        """Refresh Plex library sections so newly fixed/imported paths get indexed.
+
+        Optional ``path`` narrows to sections whose Location roots overlap that
+        path. If nothing matches (common with Docker path maps), falls back to
+        refreshing every section so reconcile follow-ups still heal indexing.
+        """
+        root = self.get("library/sections")
+        directories = list(root.findall("Directory"))
+        selected: list[ET.Element] = []
+        path_norm = (path or "").replace("\\", "/").rstrip("/")
+
+        for directory in directories:
+            locations = [
+                (loc.get("path") or "").replace("\\", "/").rstrip("/")
+                for loc in directory.findall("Location")
+            ]
+            if not path_norm or not locations:
+                selected.append(directory)
+                continue
+            matched = False
+            for loc in locations:
+                if not loc:
+                    continue
+                if (
+                    path_norm == loc
+                    or path_norm.startswith(loc + "/")
+                    or loc.startswith(path_norm + "/")
+                    or loc in path_norm
+                    or path_norm in loc
+                ):
+                    matched = True
+                    break
+            if matched:
+                selected.append(directory)
+
+        if path_norm and not selected:
+            selected = directories
+
+        refreshed: list[dict[str, Any]] = []
+        for directory in selected:
+            key = directory.get("key")
+            if not key:
+                continue
+            self.post(f"library/sections/{key}/refresh")
+            refreshed.append(
+                {
+                    "section_key": key,
+                    "title": directory.get("title"),
+                    "type": directory.get("type"),
+                }
+            )
+
+        return {
+            "status": "ok",
+            "path": path,
+            "refreshed_count": len(refreshed),
+            "sections": refreshed,
+        }
 
 
 class ArrWriteClient:
