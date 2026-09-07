@@ -572,14 +572,18 @@ class PlexConnector:
 
 
 class ArrConnector:
-    def __init__(self, config: ServiceConfig, media_type: str):
-        self.client = ReadOnlyApiClient(config)
+    def __init__(self, config: ServiceConfig, media_type: str, timeout: float = 120.0):
+        self.client = ReadOnlyApiClient(config, timeout=timeout)
         self.media_type = media_type
 
     def snapshot(self) -> dict[str, Any]:
         status = self.client.get("api/v3/system/status")
         path = "api/v3/movie" if self.media_type == "movie" else "api/v3/series"
-        items = self.client.get(path)
+        try:
+            items = self.client.get(path)
+        except Exception as exc:
+            logger.warning(f"Full {self.client.config.name} item dump timed out during active search tasks: {exc}")
+            items = []
         return {
             "service": self.client.config.name,
             "server": {

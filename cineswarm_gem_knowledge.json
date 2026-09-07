@@ -1,35 +1,43 @@
 {
   "system": "CineSwarm Omni-Catalog Copilot",
   "catalog_summary": {
-    "total_movies": 10641,
-    "total_series": 72,
-    "total_items": 10713
+    "total_movies": 10645,
+    "total_series": 67,
+    "total_items": 10712
   },
   "top_genres": {
-    "Drama": 4016,
-    "Comedy": 3242,
-    "Action": 2853,
-    "Thriller": 2805,
-    "Adventure": 1976,
-    "Horror": 1829,
-    "Crime": 1765,
-    "Animation": 1547,
-    "Science Fiction": 1521,
-    "Family": 1468,
-    "Fantasy": 1395,
-    "Romance": 1377,
+    "Drama": 4015,
+    "Comedy": 3246,
+    "Action": 2851,
+    "Thriller": 2802,
+    "Adventure": 1979,
+    "Horror": 1832,
+    "Crime": 1766,
+    "Animation": 1548,
+    "Science Fiction": 1522,
+    "Family": 1473,
+    "Fantasy": 1391,
+    "Romance": 1376,
     "Mystery": 1076,
-    "TV Movie": 470,
+    "TV Movie": 473,
     "History": 450
   },
   "video_codecs": {
-    "h264": 427,
-    "hevc": 123,
-    "vc1": 4,
-    "mpeg4": 6,
-    "av1": 5
+    "h264": 7377,
+    "mpeg4": 64,
+    "vc1": 30,
+    "hevc": 2472,
+    "av1": 176,
+    "mpeg2video": 32,
+    "msmpeg4v3": 1,
+    "vp9": 1
   },
   "recent_vault_additions_sample": [
+    "Psycho-Pass 3: First Inspector (2020) [movie]",
+    "Frisky Dingo (2006) [series]",
+    "The Amityville Harvest (2020) [movie]",
+    "Bad Milo! (2013) [movie]",
+    "Amityville Frankenstein (2023) [movie]",
     "Look Around You (2002) [series]",
     "Metalocalypse (2006) [series]",
     "Ultraman Decker Finale: Journey to Beyond (2023) [movie]",
@@ -57,7 +65,6 @@
     "Disenchantment (2018) [series]",
     "The Midnight Gospel (2020) [series]",
     "Scavengers Reign (2023) [series]",
-    "The Mighty Boosh (2004) [series]",
     "Pok\u00e9mon Concierge (2023) [series]",
     "Beyond the Black Rainbow (2010) [movie]",
     "Everything Everywhere All at Once (2022) [movie]",
@@ -75,10 +82,6 @@
     "Winnie the Pooh: Blood and Honey (2023) [movie]",
     "Barbie and Stacie to the Rescue (2024) [movie]",
     "Ballerina (2025) [movie]",
-    "Fate/kaleid liner Prisma\u2606Illya: Licht Nameless Girl (2021) [movie]",
-    "Battlestar Galactica: Blood & Chrome (2012) [movie]",
-    "The New Mutants (2020) [movie]",
-    "Alien: Ore (2019) [movie]",
-    "Madly Madagascar (2013) [movie]"
+    "Fate/kaleid liner Prisma\u2606Illya: Licht Nameless Girl (2021) [movie]"
   ]
 }
