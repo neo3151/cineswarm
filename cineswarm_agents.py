@@ -750,6 +750,88 @@ class AcquisitionPlanner:
         result = self.radarr.post_json("api/v3/release", {"guid": guid, "indexerId": int(indexer_id)})
         return {"movie_id": int(movie_id), "title": release.get("title"), "indexer": release.get("indexer"), "size": release.get("size"), "rejections": release.get("rejections") or [], "radarr_result": result}
 
+    def cutoff_unmet_search_sweep(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Search Radarr/Sonarr cutoff-unmet items using Arr write clients (not raw requests)."""
+        payload = payload or {}
+        try:
+            batch_size = int(payload.get("batch_size") or 100)
+        except (TypeError, ValueError):
+            batch_size = 100
+        batch_size = max(1, min(batch_size, 200))
+        half_batch = max(1, batch_size // 2)
+        errors: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        movies_attempted = 0
+        episodes_attempted = 0
+        movies_queued = 0
+        episodes_queued = 0
+        movie_ids: list[int] = []
+        episode_ids: list[int] = []
+        radarr_command: dict[str, Any] | None = None
+        sonarr_command: dict[str, Any] | None = None
+
+        radarr_key = getattr(getattr(self.radarr, "config", None), "api_key", None)
+        if radarr_key is not None and not radarr_key:
+            skipped.append({"service": "radarr", "reason": "missing_credentials"})
+        else:
+            try:
+                cutoff = self.radarr.get(
+                    "api/v3/wanted/cutoff",
+                    {"page": 1, "pageSize": half_batch, "sortKey": "movies.dateAdded", "sortDirection": "descending"},
+                )
+                records = cutoff.get("records", []) if isinstance(cutoff, dict) else []
+                movie_ids = [int(item["id"]) for item in records if isinstance(item, dict) and item.get("id")]
+                movies_attempted = len(movie_ids)
+                if not movie_ids:
+                    skipped.append({"service": "radarr", "reason": "empty_cutoff_queue"})
+                else:
+                    radarr_command = self.radarr.post_json("api/v3/command", {"name": "MoviesSearch", "movieIds": movie_ids})
+                    movies_queued = len(movie_ids)
+            except Exception as exc:
+                errors.append({"service": "radarr", "error": str(exc)})
+
+        sonarr_key = getattr(getattr(self.sonarr, "config", None), "api_key", None)
+        if sonarr_key is not None and not sonarr_key:
+            skipped.append({"service": "sonarr", "reason": "missing_credentials"})
+        else:
+            try:
+                cutoff = self.sonarr.get(
+                    "api/v3/wanted/cutoff",
+                    {"page": 1, "pageSize": half_batch, "sortKey": "series.title", "sortDirection": "ascending"},
+                )
+                records = cutoff.get("records", []) if isinstance(cutoff, dict) else []
+                episode_ids = [int(item["id"]) for item in records if isinstance(item, dict) and item.get("id")]
+                episodes_attempted = len(episode_ids)
+                if not episode_ids:
+                    skipped.append({"service": "sonarr", "reason": "empty_cutoff_queue"})
+                else:
+                    sonarr_command = self.sonarr.post_json("api/v3/command", {"name": "EpisodeSearch", "episodeIds": episode_ids})
+                    episodes_queued = len(episode_ids)
+            except Exception as exc:
+                errors.append({"service": "sonarr", "error": str(exc)})
+
+        status = "completed"
+        if errors and not movies_queued and not episodes_queued:
+            status = "failed"
+        elif errors:
+            status = "partial"
+        elif not movies_queued and not episodes_queued:
+            status = "succeeded_empty"
+        return {
+            "status": status,
+            "batch_size": batch_size,
+            "movies_attempted": movies_attempted,
+            "episodes_attempted": episodes_attempted,
+            "movies_queued": movies_queued,
+            "episodes_queued": episodes_queued,
+            "movie_ids": movie_ids,
+            "episode_ids": episode_ids,
+            "radarr_command_id": (radarr_command or {}).get("id") if isinstance(radarr_command, dict) else None,
+            "sonarr_command_id": (sonarr_command or {}).get("id") if isinstance(sonarr_command, dict) else None,
+            "skipped": skipped,
+            "errors": errors,
+        }
+
     def search(self, payload: dict[str, Any]) -> dict[str, Any]:
         media_type = payload.get("media_type")
         item_id = payload.get("service_id")

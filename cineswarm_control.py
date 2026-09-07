@@ -75,7 +75,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_WORKER_MAX_ATTEMPTS", "CINESWARM_WORKER_LEASE_SECONDS", "CINESWARM_WORKER_POLL_SECONDS",
     "CINESWARM_REFRESH_INTERVAL", "CINESWARM_CATALOG_INTERVAL", "CINESWARM_RECONCILE_INTERVAL",
     "CINESWARM_QUEUE_INTERVAL", "CINESWARM_DISCOVERY_INTERVAL", "CINESWARM_AUTONOMOUS_INTERVAL",
-    "CINESWARM_FAILED_DOWNLOAD_INTERVAL",
+    "CINESWARM_FAILED_DOWNLOAD_INTERVAL", "CINESWARM_X265_SWEEP_COOLDOWN", "CINESWARM_X265_SWEEP_BATCH_SIZE",
     "CINESWARM_DISCOVERY_ENABLED", "CINESWARM_NOTIFICATION_WEBHOOK", "CINESWARM_DISCORD_WEBHOOK",
     "CINESWARM_DISCORD_BOT_TOKEN", "CINESWARM_DISCORD_GUILD_IDS", "CINESWARM_DISCORD_CHANNEL_IDS",
     "CINESWARM_DISCORD_USER_IDS", "CINESWARM_DISCORD_SETUP_CODE", "CINESWARM_DISCORD_REQUIRE_MENTION", "CINESWARM_DISCORD_PREFIX",
@@ -600,7 +600,7 @@ class Policy:
     """Keep writes explicit, narrow, approval-gated, and auditable."""
 
     READ_ONLY_ACTIONS = {"refresh_snapshot", "view_status", "create_proposal", "reconcile_library"}
-    APPROVAL_REQUIRED_ACTIONS = {"plex_library_refresh", "radarr_add_request", "sonarr_add_request", "radarr_search_request", "sonarr_search_request", "radarr_search_retry_request", "sonarr_search_retry_request", "radarr_release_grab_request"}
+    APPROVAL_REQUIRED_ACTIONS = {"plex_library_refresh", "radarr_add_request", "sonarr_add_request", "radarr_search_request", "sonarr_search_request", "radarr_search_retry_request", "sonarr_search_retry_request", "radarr_release_grab_request", "x265_upgrade_sweep_request"}
     AUTOMATIC_ACTIONS = {"plex_library_refresh"}
 
     @classmethod
@@ -1727,7 +1727,7 @@ class ControlPlane:
         """Log an autonomous decision into the decision log."""
         import uuid
         decision_id = f"dec-{uuid.uuid4().hex[:8]}"
-        now_iso = timestamp()
+        now_iso = now()
         with sqlite3.connect(CONTROL_DB) as conn:
             conn.execute(
                 "INSERT INTO decision_log (decision_id, actor, category, subject, decision, reasons_json, outcome_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1739,7 +1739,7 @@ class ControlPlane:
         """Record user 👍 (good) or 👎 (bad) feedback on an autonomous decision."""
         if sentiment not in ("good", "bad"):
             return False
-        now_iso = timestamp()
+        now_iso = now()
         with sqlite3.connect(CONTROL_DB) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO decision_feedback (decision_id, actor, sentiment, note, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1839,50 +1839,176 @@ class ControlPlane:
         res["auto_heal_tasks"] = auto_heal_tasks
         return res
 
-    def run_x265_upgrade_sweep(self, batch_size: int = 100, actor: str = "autonomic") -> dict[str, Any]:
-        """Trigger aggressive x265/HEVC upgrade search batch across Radarr and Sonarr Cutoff Unmet queues."""
-        sonarr_url = os.environ.get("SONARR_URL", "http://127.0.0.1:8989")
-        sonarr_api = os.environ.get("SONARR_API_KEY", "")
-        radarr_url = os.environ.get("RADARR_URL", "http://127.0.0.1:7878")
-        radarr_api = os.environ.get("RADARR_API_KEY", "")
+    def run_x265_upgrade_sweep(self, batch_size: int = 100, actor: str = "autonomic", allow_automatic: bool = True) -> dict[str, Any]:
+        """Trigger an approval-aware x265/HEVC cutoff upgrade search across Radarr and Sonarr."""
+        try:
+            batch_size = int(batch_size or self.store.get_policy("CINESWARM_X265_SWEEP_BATCH_SIZE") or os.environ.get("CINESWARM_X265_SWEEP_BATCH_SIZE", "100"))
+        except (TypeError, ValueError):
+            batch_size = 100
+        batch_size = max(1, min(batch_size, 200))
+        reasons: dict[str, Any] = {"batch_size": batch_size, "actor": actor}
 
-        movie_count = 0
-        episode_count = 0
-        half_batch = max(1, batch_size // 2)
+        if self.store.is_emergency_stop() or os.environ.get("CINESWARM_AUTO_EMERGENCY_STOP", "false").lower() in {"1", "true", "yes", "on"}:
+            result = {
+                "status": "blocked_emergency_stop",
+                "batch_size": batch_size,
+                "movies_queued": 0,
+                "episodes_queued": 0,
+                "movies_attempted": 0,
+                "episodes_attempted": 0,
+                "skipped": [{"reason": "emergency_stop"}],
+                "errors": [],
+                "timestamp": now(),
+            }
+            self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "blocked_emergency_stop", result)
+            decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "blocked_emergency_stop", reasons, result)
+            result["decision_id"] = decision_id
+            return result
 
-        # Radarr Cutoff Unmet
-        if radarr_api:
+        try:
+            cooldown = int(self.store.get_policy("CINESWARM_X265_SWEEP_COOLDOWN") or os.environ.get("CINESWARM_X265_SWEEP_COOLDOWN", "3600"))
+        except (TypeError, ValueError):
+            cooldown = 3600
+        cooldown = max(0, cooldown)
+        last_run = self.store.last_audit_time("x265_upgrade_sweep", "radarr_sonarr", "completed")
+        if last_run and cooldown:
             try:
-                r_cutoff = requests.get(f"{radarr_url}/api/v3/wanted/cutoff", headers={"X-Api-Key": radarr_api}, params={"pageSize": half_batch, "sortKey": "movie.added", "sortDirection": "descending"}, timeout=10).json()
-                movie_records = r_cutoff.get("records", [])
-                movie_ids = [m.get("id") for m in movie_records if m.get("id")]
-                if movie_ids:
-                    requests.post(f"{radarr_url}/api/v3/command", headers={"X-Api-Key": radarr_api}, json={"name": "MoviesSearch", "movieIds": movie_ids}, timeout=10)
-                    movie_count = len(movie_ids)
-            except Exception as e:
-                logger.warning(f"x265 Radarr upgrade sweep failed: {e}")
+                previous = datetime.fromisoformat(last_run)
+                if previous.tzinfo is None:
+                    previous = previous.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - previous).total_seconds()
+                if age < cooldown:
+                    result = {
+                        "status": "skipped_cooldown",
+                        "batch_size": batch_size,
+                        "movies_queued": 0,
+                        "episodes_queued": 0,
+                        "movies_attempted": 0,
+                        "episodes_attempted": 0,
+                        "skipped": [{"reason": "cooldown", "cooldown_seconds": cooldown, "age_seconds": int(age), "last_run": last_run}],
+                        "errors": [],
+                        "timestamp": now(),
+                    }
+                    self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "skipped_cooldown", result)
+                    decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "skipped_cooldown", reasons, result)
+                    result["decision_id"] = decision_id
+                    return result
+            except ValueError:
+                pass
 
-        # Sonarr Cutoff Unmet
-        if sonarr_api:
+        if self.planner:
             try:
-                s_cutoff = requests.get(f"{sonarr_url}/api/v3/wanted/cutoff", headers={"X-Api-Key": sonarr_api}, params={"pageSize": half_batch, "sortKey": "series.title", "sortDirection": "ascending"}, timeout=10).json()
-                ep_records = s_cutoff.get("records", [])
-                episode_ids = [e.get("id") for e in ep_records if e.get("id")]
-                if episode_ids:
-                    requests.post(f"{sonarr_url}/api/v3/command", headers={"X-Api-Key": sonarr_api}, json={"name": "EpisodeSearch", "episodeIds": episode_ids}, timeout=10)
-                    episode_count = len(episode_ids)
-            except Exception as e:
-                logger.warning(f"x265 Sonarr upgrade sweep failed: {e}")
+                limit = int(self.store.get_policy("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS") or os.environ.get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "2"))
+            except (TypeError, ValueError):
+                limit = 2
+            try:
+                pressure = self.planner.global_queue_pressure(max(1, limit))
+            except Exception as exc:
+                pressure = {"pressured": False, "error": str(exc)}
+            reasons["queue_pressure"] = {key: pressure.get(key) for key in ("pressured", "active", "limit", "status", "error") if key in pressure or key == "error"}
+            if pressure.get("pressured"):
+                result = {
+                    "status": "skipped_queue_limit",
+                    "batch_size": batch_size,
+                    "movies_queued": 0,
+                    "episodes_queued": 0,
+                    "movies_attempted": 0,
+                    "episodes_attempted": 0,
+                    "skipped": [{"reason": "queue_limit", "active": pressure.get("active"), "limit": pressure.get("limit")}],
+                    "errors": [],
+                    "queue_pressure": pressure,
+                    "timestamp": now(),
+                }
+                self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "skipped_queue_limit", result)
+                decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "skipped_queue_limit", reasons, result)
+                result["decision_id"] = decision_id
+                return result
 
+        if not self.planner:
+            result = {
+                "status": "error",
+                "batch_size": batch_size,
+                "movies_queued": 0,
+                "episodes_queued": 0,
+                "movies_attempted": 0,
+                "episodes_attempted": 0,
+                "skipped": [],
+                "errors": [{"error": "Acquisition planner is not configured"}],
+                "timestamp": now(),
+            }
+            self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "error", result)
+            decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "failed", reasons, result)
+            result["decision_id"] = decision_id
+            return result
+
+        payload = {"batch_size": batch_size, "parent_task_id": "x265-upgrade-sweep", "reason": "Cutoff unmet x265/HEVC upgrade search sweep"}
+        full_autopilot = (self.store.get_policy("CINESWARM_FULL_AUTOPILOT") or "false").lower() in {"1", "true", "yes", "on"}
+        operator_actor = actor == "dashboard" or str(actor).startswith("discord:")
+        execute_now = operator_actor or (full_autopilot and allow_automatic)
+        reasons["full_autopilot"] = full_autopilot
+        reasons["operator_actor"] = operator_actor
+
+        task_id = self.store.create_task("x265_upgrade_sweep_request", actor, payload)
+        if not execute_now:
+            result = {
+                "status": "pending_approval",
+                "task_id": task_id,
+                "batch_size": batch_size,
+                "movies_queued": 0,
+                "episodes_queued": 0,
+                "movies_attempted": 0,
+                "episodes_attempted": 0,
+                "skipped": [{"reason": "approval_required"}],
+                "errors": [],
+                "timestamp": now(),
+            }
+            self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "pending_approval", result)
+            decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "approval_required", reasons, result)
+            result["decision_id"] = decision_id
+            return result
+
+        try:
+            approved = self.approve_task(task_id, actor)
+            execution = approved.get("result") or {}
+        except Exception as exc:
+            result = {
+                "status": "failed",
+                "task_id": task_id,
+                "batch_size": batch_size,
+                "movies_queued": 0,
+                "episodes_queued": 0,
+                "movies_attempted": 0,
+                "episodes_attempted": 0,
+                "skipped": [],
+                "errors": [{"error": str(exc)}],
+                "timestamp": now(),
+            }
+            self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", "failed", result)
+            decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", "failed", reasons, result)
+            result["decision_id"] = decision_id
+            return result
+
+        status = execution.get("status") or "completed"
         result = {
-            "status": "triggered",
+            "status": status if status != "completed" else "triggered",
+            "task_id": task_id,
             "batch_size": batch_size,
-            "movies_queued": movie_count,
-            "episodes_queued": episode_count,
-            "timestamp": timestamp()
+            "movies_attempted": execution.get("movies_attempted", 0),
+            "episodes_attempted": execution.get("episodes_attempted", 0),
+            "movies_queued": execution.get("movies_queued", 0),
+            "episodes_queued": execution.get("episodes_queued", 0),
+            "radarr_command_id": execution.get("radarr_command_id"),
+            "sonarr_command_id": execution.get("sonarr_command_id"),
+            "skipped": execution.get("skipped") or [],
+            "errors": execution.get("errors") or [],
+            "timestamp": now(),
         }
-        self.store.audit(actor, "x265_upgrade_sweep", "autonomic", "radarr_sonarr", "completed", result)
+        audit_status = "completed" if status in {"completed", "succeeded_empty", "triggered", "partial"} else status
+        self.store.audit(actor, "x265_upgrade_sweep", "radarr_sonarr", "approval-gated", audit_status, result)
+        decision_id = self.store.record_decision(actor, "x265_upgrade_sweep", "radarr_sonarr_cutoff", audit_status, reasons, result)
+        result["decision_id"] = decision_id
         return result
+
 
     def generate_movie_chapters(self, title: str, year: int | None = None, actor: str = "dashboard") -> dict[str, Any]:
         """Generate AI Chapter Markers & Scene Summaries and auto-inject into movie folder."""
@@ -3567,7 +3693,16 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/reconcile":
             self._send(200, self.plane.reconcile("dashboard"))
         elif self.path == "/api/x265/upgrade":
-            self._send(200, self.plane.run_x265_upgrade_sweep(batch_size=100, actor="dashboard"))
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                batch_size = int(payload.get("batch_size") or 100)
+                result = self.plane.run_x265_upgrade_sweep(batch_size=batch_size, actor="dashboard", allow_automatic=True)
+                self._send(200, result)
+            except (json.JSONDecodeError, TypeError, ValueError, AgentError, ServiceError) as exc:
+                self._send(400, {"error": str(exc)})
         elif self.path == "/api/gem/action":
             length = int(self.headers.get("Content-Length", "0"))
             try:
@@ -4042,6 +4177,7 @@ def make_plane() -> ControlPlane:
         "radarr_search_retry_request": planner.search,
         "radarr_release_grab_request": planner.grab_release,
         "sonarr_search_retry_request": planner.search,
+        "x265_upgrade_sweep_request": planner.cutoff_unmet_search_sweep,
     }
     writers = {"plex": plex_writer, "radarr": radarr_writer, "sonarr": sonarr_writer}
     return ControlPlane(store, connectors, actions, planner, writers)

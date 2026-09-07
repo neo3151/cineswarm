@@ -289,7 +289,7 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `upgrade`, `upgrade sweep`/`x265`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
         if lowered == "decisions":
@@ -385,12 +385,23 @@ class DiscordService:
             for m in cands[:5]:
                 lines.append(f"• **{m['title']} ({m.get('year') or 'n.d.'})** - {m.get('overview', '')[:100]}")
             return "\n".join(lines)
+        if lowered in ("x265", "x265 upgrade", "upgrade sweep", "hevc upgrade", "hevc sweep"):
+            res = self.plane.run_x265_upgrade_sweep(batch_size=100, actor=actor, allow_automatic=True)
+            skipped = ", ".join((item.get("reason") if isinstance(item, dict) else str(item)) for item in (res.get("skipped") or [])) or "none"
+            errors = "; ".join((item.get("error") if isinstance(item, dict) else str(item)) for item in (res.get("errors") or [])) or "none"
+            return (
+                f"🎞️ **x265/HEVC Upgrade Sweep — `{res.get('status')}`**\n"
+                f"Movies queued: `{res.get('movies_queued', 0)}` (attempted `{res.get('movies_attempted', 0)}`)\n"
+                f"Episodes queued: `{res.get('episodes_queued', 0)}` (attempted `{res.get('episodes_attempted', 0)}`)\n"
+                f"Skipped: {skipped}\nErrors: {errors}\n"
+                f"Task `{res.get('task_id') or 'n/a'}` · Decision `{res.get('decision_id') or 'n/a'}`."
+            )
         if lowered.startswith("upgrade"):
             media_type = "movie"
             if "series" in lowered or "tv" in lowered:
                 media_type = "series"
             res = self.plane.quality_analysis(media_type, actor=actor)
-            return f"🎬 **Quality Analysis Summary ({media_type.upper()}):**\nManaged: `{res.get('managed', 0)}` | Upgrade Candidates: `{res.get('upgrade_candidate_count', 0)}`\nUse dashboard or `!cine plan TITLE` to trigger upgrades."
+            return f"🎬 **Quality Analysis Summary ({media_type.upper()}):**\nManaged: `{res.get('managed', 0)}` | Upgrade Candidates: `{res.get('upgrade_candidate_count', 0)}`\nUse `!cine upgrade sweep` / `!cine x265` or the dashboard **Run x265 upgrade sweep** control to search cutoff-unmet queues."
         result = self.plane.agents.ask(text, actor)
         return result.get("answer") or "CineSwarm returned no answer."
 
@@ -650,6 +661,15 @@ class CineSwarmClient(discord.Client):
                 return
             await interaction.response.defer()
             resp = await asyncio.to_thread(self.service.handle, "scan_health", interaction.user.id)
+            await interaction.followup.send(resp)
+
+        @self.tree.command(name="x265_upgrade", description="Run Radarr/Sonarr cutoff-unmet x265/HEVC upgrade search sweep")
+        async def slash_x265_upgrade(interaction: discord.Interaction):
+            if not self.service.authorized(interaction.user.id, interaction.guild.id if interaction.guild else None, interaction.channel_id):
+                await interaction.response.send_message("Unauthorized Discord identity.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            resp = await asyncio.to_thread(self.service.handle, "x265", interaction.user.id)
             await interaction.followup.send(resp)
 
         @self.tree.command(name="decisions", description="View recent autonomous decisions logged by CineSwarm")

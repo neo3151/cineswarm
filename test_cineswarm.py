@@ -967,5 +967,167 @@ class AIEnrichmentTests(unittest.TestCase):
         self.assertIn("[TRIVIA] Director: This scene was shot in one continuous take.", srt)
 
 
+
+
+class X265UpgradeSweepTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = os.path.join(self.temporary.name, "control.db")
+        self.store = ControlStore(self.database)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _plane(self, radarr=None, sonarr=None, policies=None):
+        policies = policies or {}
+        original_get = self.store.get_policy
+        original_set = self.store.set_policy
+
+        def get_policy(key):
+            if key in policies:
+                return policies[key]
+            return original_get(key)
+
+        self.store.get_policy = get_policy
+        radarr = radarr or FakeArrClient()
+        sonarr = sonarr or FakeArrClient()
+        planner = AcquisitionPlanner(radarr, sonarr, ReadOnlyTools(self.store, os.path.join(self.temporary.name, "catalog.db")))
+        actions = {"x265_upgrade_sweep_request": planner.cutoff_unmet_search_sweep}
+        plane = ControlPlane(self.store, {}, actions, planner, {"radarr": radarr, "sonarr": sonarr})
+        return plane, radarr, sonarr
+
+    def test_policy_classifies_x265_sweep_as_approval_required(self):
+        decision, reason = Policy.classify("x265_upgrade_sweep_request")
+        self.assertEqual(decision, "approval_required")
+        self.assertEqual(reason, "requires_explicit_approval")
+
+    def test_cutoff_unmet_search_sweep_posts_commands_and_handles_empty(self):
+        class SweepClient(FakeArrClient):
+            def __init__(self, records):
+                super().__init__()
+                self.records = records
+
+            def get(self, path, params=None):
+                if path == "api/v3/wanted/cutoff":
+                    return {"records": self.records}
+                return super().get(path, params)
+
+        radarr = SweepClient([{"id": 11}, {"id": 12}])
+        sonarr = SweepClient([])
+        planner = AcquisitionPlanner(radarr, sonarr, ReadOnlyTools(self.store, os.path.join(self.temporary.name, "catalog.db")))
+        result = planner.cutoff_unmet_search_sweep({"batch_size": 10})
+        self.assertEqual(result["movies_queued"], 2)
+        self.assertEqual(result["episodes_queued"], 0)
+        self.assertEqual(result["status"], "partial" if result["errors"] else "completed")
+        self.assertTrue(any(item.get("reason") == "empty_cutoff_queue" for item in result["skipped"]))
+        self.assertEqual(radarr.post_calls[0][0], "api/v3/command")
+        self.assertEqual(radarr.post_calls[0][1]["name"], "MoviesSearch")
+        self.assertEqual(radarr.post_calls[0][1]["movieIds"], [11, 12])
+        self.assertEqual(sonarr.post_calls, [])
+
+    def test_emergency_stop_blocks_x265_sweep(self):
+        self.store.set_policy("CINESWARM_AUTO_EMERGENCY_STOP", "true")
+        plane, radarr, sonarr = self._plane()
+        result = plane.run_x265_upgrade_sweep(batch_size=20, actor="dashboard")
+        self.assertEqual(result["status"], "blocked_emergency_stop")
+        self.assertEqual(radarr.post_calls, [])
+        self.assertEqual(sonarr.post_calls, [])
+        self.assertTrue(result.get("decision_id"))
+
+    def test_queue_pressure_skips_x265_sweep(self):
+        class PressuredPlanner:
+            def __init__(self):
+                self.radarr = FakeArrClient()
+                self.sonarr = FakeArrClient()
+
+            def global_queue_pressure(self, limit):
+                return {"pressured": True, "active": 5, "limit": limit, "status": "pressured"}
+
+            def cutoff_unmet_search_sweep(self, payload=None):
+                raise AssertionError("sweep should not execute under queue pressure")
+
+        plane = ControlPlane(self.store, {}, {"x265_upgrade_sweep_request": lambda payload: {"status": "completed"}}, PressuredPlanner(), {})
+        result = plane.run_x265_upgrade_sweep(batch_size=20, actor="dashboard")
+        self.assertEqual(result["status"], "skipped_queue_limit")
+        self.assertTrue(any(item.get("reason") == "queue_limit" for item in result["skipped"]))
+
+    def test_dashboard_actor_executes_sweep_with_audit(self):
+        class SweepClient(FakeArrClient):
+            def __init__(self, records, command_name_key):
+                super().__init__()
+                self.records = records
+                self.command_name_key = command_name_key
+                self.config = SimpleNamespace(api_key="test-key")
+
+            def get(self, path, params=None):
+                if path == "api/v3/wanted/cutoff":
+                    return {"records": self.records}
+                if path == "api/v3/queue":
+                    return {"records": []}
+                return super().get(path, params)
+
+        radarr = SweepClient([{"id": 7}], "movieIds")
+        sonarr = SweepClient([{"id": 9}], "episodeIds")
+        plane, _, _ = self._plane(radarr=radarr, sonarr=sonarr, policies={"CINESWARM_X265_SWEEP_COOLDOWN": "0"})
+        result = plane.run_x265_upgrade_sweep(batch_size=4, actor="dashboard")
+        self.assertIn(result["status"], {"triggered", "completed", "partial"})
+        self.assertEqual(result["movies_queued"], 1)
+        self.assertEqual(result["episodes_queued"], 1)
+        self.assertTrue(result.get("task_id"))
+        self.assertTrue(result.get("decision_id"))
+        self.assertEqual(radarr.post_calls[0][1]["name"], "MoviesSearch")
+        self.assertEqual(sonarr.post_calls[0][1]["name"], "EpisodeSearch")
+
+    def test_non_operator_without_autopilot_requires_approval(self):
+        plane, radarr, sonarr = self._plane(policies={"CINESWARM_FULL_AUTOPILOT": "false", "CINESWARM_X265_SWEEP_COOLDOWN": "0"})
+        result = plane.run_x265_upgrade_sweep(batch_size=8, actor="worker")
+        self.assertEqual(result["status"], "pending_approval")
+        self.assertTrue(result.get("task_id"))
+        self.assertEqual(radarr.post_calls, [])
+        self.assertEqual(sonarr.post_calls, [])
+
+    def test_cooldown_skips_repeat_sweep(self):
+        class SweepClient(FakeArrClient):
+            def __init__(self):
+                super().__init__()
+                self.config = SimpleNamespace(api_key="key")
+
+            def get(self, path, params=None):
+                if path == "api/v3/wanted/cutoff":
+                    return {"records": [{"id": 1}]}
+                if path == "api/v3/queue":
+                    return {"records": []}
+                return super().get(path, params)
+
+        radarr = SweepClient()
+        sonarr = SweepClient()
+        plane, _, _ = self._plane(radarr=radarr, sonarr=sonarr, policies={"CINESWARM_X265_SWEEP_COOLDOWN": "3600"})
+        first = plane.run_x265_upgrade_sweep(batch_size=2, actor="dashboard")
+        self.assertIn(first["status"], {"triggered", "completed", "partial"})
+        second = plane.run_x265_upgrade_sweep(batch_size=2, actor="dashboard")
+        self.assertEqual(second["status"], "skipped_cooldown")
+
+    def test_discord_x265_command_reports_status(self):
+        plane = SimpleNamespace(run_x265_upgrade_sweep=lambda batch_size=100, actor="autonomic", allow_automatic=True: {
+            "status": "triggered",
+            "movies_queued": 3,
+            "episodes_queued": 1,
+            "movies_attempted": 3,
+            "episodes_attempted": 1,
+            "skipped": [],
+            "errors": [],
+            "task_id": "task-1",
+            "decision_id": "dec-1",
+        })
+        service = DiscordService(plane)
+        service.guild_ids = {1}
+        service.channel_ids = {2}
+        service.user_ids = {3}
+        message = service.handle("x265", 3)
+        self.assertIn("triggered", message)
+        self.assertIn("Movies queued: `3`", message)
+        self.assertIn("dec-1", message)
+
+
 if __name__ == "__main__":
     unittest.main()

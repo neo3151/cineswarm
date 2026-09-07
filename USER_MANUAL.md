@@ -108,6 +108,8 @@ or mention the bot:
 | `!cine digest` | Daily library spotlight digest & stats | No |
 | `!cine scan_plex` | Trigger an immediate Plex library scan | Yes |
 | `!cine scan_health` | Run ffprobe/ffmpeg integrity inspection across catalog | Yes |
+| `!cine upgrade` | Advisory quality analysis for movies or series | No |
+| `!cine upgrade sweep` / `!cine x265` | Search Radarr/Sonarr cutoff-unmet queues for x265/HEVC upgrades (gated) | Yes |
 | `!cine sync_collections` | Automatically group films into Plex native franchise collections | Yes |
 | `!cine curate THEME` | AI-curate and tag a thematic collection directly in Plex | Yes |
 | `!cine playlist THEME` | AI-curate a custom playlist directly in Plex | Yes |
@@ -375,6 +377,30 @@ Need a movie suggestion matching a specific time window or genre?
 
 CineSwarm uses `ffprobe` and `ffmpeg` to inspect video files for missing headers, zero-byte errors, missing audio/video streams, unreadable containers, and corrupted frames. When corrupted media is detected, CineSwarm updates catalog metadata and can trigger auto-healing re-search tasks.
 
+### x265 / HEVC Upgrade Sweep
+
+Trigger a bounded cutoff-unmet search across Radarr and Sonarr when you want the *Arr stack to hunt for higher-quality (typically x265/HEVC) releases that satisfy configured quality cutoffs:
+
+```text
+!cine upgrade sweep
+```
+
+```text
+!cine x265
+```
+
+Slash command: `/x265_upgrade`. Dashboard: **Operations → Run x265 upgrade sweep**.
+
+Safety alignment:
+
+- Emergency stop blocks the sweep.
+- Queue pressure (`CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS`) skips the sweep when downloads are already saturated.
+- Cooldown (`CINESWARM_X265_SWEEP_COOLDOWN`, default 3600 seconds) prevents silent repeat storms.
+- Dashboard and paired Discord actors execute after those gates; non-operator / worker callers create a pending `x265_upgrade_sweep_request` unless full autopilot is enabled.
+- Results always report attempted, queued, skipped, and error counts, and write audit + decision-log entries.
+- Empty cutoff queues and missing Arr credentials are reported as skips, not failures that retry forever.
+- There is intentionally **no** worker schedule for this sweep (operator-triggered only).
+
 ### AI Scene Chapters & Director Commentary
 
 Generate rich narrative chapter summaries and director commentary subtitle tracks for any movie:
@@ -510,6 +536,7 @@ http://192.168.1.23:8787
 | Reconcile library | Compare Plex provider IDs with Radarr/Sonarr state |
 | Analyze movie quality | Report file quality and advisory upgrade candidates |
 | Analyze series completeness | Report Sonarr episode completeness |
+| Run x265 upgrade sweep | Search cutoff-unmet Radarr/Sonarr items for HEVC upgrades; reports attempted/queued/skipped/errors |
 | Playback profile | Show Plex-derived viewing preferences |
 | Request Plex scan | Create a pending Plex refresh task |
 | Approve pending action | Execute the selected pending task |
@@ -891,6 +918,7 @@ Only the paired Discord identity in the paired channel can issue trusted full-au
 | Plex refresh | Automatic when reconciliation and cooldown policy permit |
 | Background discovery add/search | Executes only after queue, storage, duplicate, genre, score, and emergency gates pass |
 | Failed-download retry | Executes once automatically, then records the outcome without looping |
+| x265/HEVC upgrade sweep | Dashboard/Discord execute after emergency-stop, queue-pressure, and cooldown gates; otherwise pending approval unless full autopilot; no worker schedule |
 | Legacy `confirm` task | Available for older or externally created pending tasks |
 | Delete, move, metadata edit | Not implemented |
 
