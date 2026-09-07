@@ -76,7 +76,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_REFRESH_INTERVAL", "CINESWARM_CATALOG_INTERVAL", "CINESWARM_RECONCILE_INTERVAL",
     "CINESWARM_QUEUE_INTERVAL", "CINESWARM_DISCOVERY_INTERVAL", "CINESWARM_AUTONOMOUS_INTERVAL",
     "CINESWARM_FAILED_DOWNLOAD_INTERVAL",
-    "CINESWARM_DISCOVERY_ENABLED", "CINESWARM_NOTIFICATION_WEBHOOK", "CINESWARM_DISCORD_WEBHOOK",
+    "CINESWARM_DISCOVERY_ENABLED", "CINESWARM_NOTIFICATION_WEBHOOK", "CINESWARM_MONITOR_WEBHOOK", "CINESWARM_DISCORD_WEBHOOK",
     "CINESWARM_DISCORD_BOT_TOKEN", "CINESWARM_DISCORD_GUILD_IDS", "CINESWARM_DISCORD_CHANNEL_IDS",
     "CINESWARM_DISCORD_USER_IDS", "CINESWARM_DISCORD_SETUP_CODE", "CINESWARM_DISCORD_REQUIRE_MENTION", "CINESWARM_DISCORD_PREFIX",
     "CINESWARM_NOTIFICATION_COOLDOWN", "CINESWARM_HEARTBEAT_STALE_SECONDS", "CINESWARM_NOTIFY_ON_FAILED_DOWNLOAD",
@@ -98,6 +98,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/discovery": "/api/discovery",
     "/api/v1/operations/queue": "/api/operations/queue",
     "/api/v1/preservation": "/api/preservation",
+    "/api/v1/monitoring/snapshot": "/api/monitoring/snapshot",
 }
 
 
@@ -2109,6 +2110,81 @@ class ControlPlane:
         detail["errors"] = errors
         return detail
 
+    def monitoring_snapshot(self, hours: int = 24) -> dict[str, Any]:
+        """Compact read-only ops snapshot for external watchers and Discord live monitor."""
+        hours = max(1, min(int(hours), 168))
+        status = self.store.status()
+        summary = self.store.operational_summary(hours=hours)
+        detail = self.store.queue_detail(limit=50)
+        services = status.get("services") or []
+        unhealthy = [item.get("service") for item in services if item.get("status") != "healthy"]
+        worker = status.get("worker") or {}
+        worker_healthy = bool(worker.get("healthy"))
+        healthy_count = sum(1 for item in services if item.get("status") == "healthy")
+        if len(services) >= 3 and not unhealthy and worker_healthy:
+            overall = "healthy"
+        elif services and healthy_count == 0:
+            overall = "unhealthy"
+        elif unhealthy and not worker_healthy:
+            overall = "unhealthy"
+        else:
+            overall = "degraded"
+        downloads = {"movies": 0, "series": 0}
+        download_errors: dict[str, str] = {}
+        if self.planner:
+            for media_type, key in (("movie", "movies"), ("series", "series")):
+                try:
+                    queue = self.planner.queue(media_type) or {}
+                    records = queue.get("records", []) if isinstance(queue, dict) else []
+                    downloads[key] = int(queue.get("total_records", queue.get("totalRecords", len(records))) or 0)
+                except Exception as exc:
+                    download_errors[key] = str(exc)
+        downloads["total"] = int(downloads["movies"]) + int(downloads["series"])
+        task_counts = detail.get("task_counts") or {}
+        pending_approvals = int(task_counts.get("pending_approval", 0) or 0)
+        recent_failures = []
+        for issue in (summary.get("actionable_issues") or [])[:10]:
+            recent_failures.append({
+                "type": issue.get("type"),
+                "status": issue.get("status") or issue.get("state"),
+                "action": issue.get("action") or issue.get("task_type") or issue.get("path"),
+                "error": issue.get("error"),
+            })
+        return {
+            "overall_status": overall,
+            "services": [
+                {
+                    "service": item.get("service"),
+                    "status": item.get("status"),
+                    "fetched_at": item.get("fetched_at"),
+                    "item_count": item.get("item_count"),
+                    "error": item.get("error"),
+                }
+                for item in services
+            ],
+            "unhealthy_services": unhealthy,
+            "worker": {
+                "healthy": worker.get("healthy"),
+                "status": worker.get("status"),
+                "age_seconds": worker.get("age_seconds"),
+                "updated_at": worker.get("updated_at"),
+                "worker_id": worker.get("worker_id"),
+            },
+            "downloads": downloads,
+            "download_errors": download_errors,
+            "pending_approvals": pending_approvals,
+            "task_counts": {key: int(value) for key, value in task_counts.items()},
+            "recent_failures": recent_failures,
+            "failure_summary": {
+                "audit_failures": (summary.get("audit") or {}).get("failures", 0),
+                "task_failures": (summary.get("tasks") or {}).get("failures", 0),
+                "actionable_issues": len(summary.get("actionable_issues") or []),
+                "window_hours": hours,
+            },
+            "emergency_stop": bool(self.store.is_emergency_stop()),
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
     def acquisition_plan(self, media_type: str, term: str, actor: str = "dashboard") -> dict[str, Any]:
         if not self.planner:
             raise AgentError("Acquisition planner is not configured")
@@ -3300,7 +3376,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         requested_path = parsed.path
-        if requested_path not in {"/api/health", "/api/v1/health"} and not self._require_authentication():
+        if requested_path not in {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot"} and not self._require_authentication():
             return
         canonical_path = READ_ONLY_V1_ALIASES.get(requested_path, requested_path)
         self.path = canonical_path + (("?" + parsed.query) if parsed.query else "")
@@ -3321,6 +3397,14 @@ class Handler(BaseHTTPRequestHandler):
             worker_healthy = bool((status.get("worker") or {}).get("healthy"))
             healthy = worker_healthy and not unhealthy and len(status.get("services", [])) == 3
             self._send(200 if healthy else 503, {"status": "healthy" if healthy else "unhealthy", "worker": status.get("worker"), "unhealthy_services": unhealthy})
+        elif canonical_path == "/api/monitoring/snapshot":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                hours = int(query.get("hours", ["24"])[0])
+            except ValueError:
+                self._send(400, {"error": "hours must be an integer"})
+                return
+            self._send(200, self.plane.monitoring_snapshot(hours=hours))
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):

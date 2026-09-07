@@ -154,6 +154,45 @@ class DiscordService:
             f"{srv_str}"
         )
 
+    def _monitor(self) -> str:
+        snapshot = self.plane.monitoring_snapshot() if hasattr(self.plane, "monitoring_snapshot") else {}
+        overall = str(snapshot.get("overall_status") or "unknown").upper()
+        icon = {"HEALTHY": "🟢", "DEGRADED": "🟡", "UNHEALTHY": "🔴"}.get(overall, "⚪")
+        worker = snapshot.get("worker") or {}
+        worker_label = "current" if worker.get("healthy") else "stale"
+        downloads = snapshot.get("downloads") or {}
+        services = snapshot.get("services") or []
+        unhealthy = snapshot.get("unhealthy_services") or []
+        failures = snapshot.get("recent_failures") or []
+        srv_lines = []
+        for item in services:
+            st = item.get("status", "unknown")
+            mark = "🟢" if st == "healthy" else "🔴"
+            srv_lines.append(f"  {mark} **{str(item.get('service', '?')).capitalize()}**: `{str(st).upper()}`")
+        top_issues = []
+        for issue in failures[:5]:
+            label = issue.get("type") or "issue"
+            detail = issue.get("action") or issue.get("error") or issue.get("status") or ""
+            top_issues.append(f"• `{label}` {detail}".strip())
+        if not top_issues and unhealthy:
+            top_issues = [f"• Unhealthy: {', '.join(unhealthy)}"]
+        if not top_issues:
+            top_issues = ["• No recent actionable failures"]
+        stop = "ACTIVE" if snapshot.get("emergency_stop") else "off"
+        return (
+            f"{icon} **CineSwarm Live Monitor — {overall}**\n"
+            "```text\n"
+            f"Downloads     : {downloads.get('movies', 0)} movies | {downloads.get('series', 0)} series\n"
+            f"Pending approve: {snapshot.get('pending_approvals', 0)}\n"
+            f"Worker        : {worker_label} ({worker.get('status', 'unknown')}, age {worker.get('age_seconds', '?')}s)\n"
+            f"Emergency stop: {stop}\n"
+            "```\n"
+            "**Services:**\n"
+            + ("\n".join(srv_lines) if srv_lines else "  • No service telemetry")
+            + "\n\n**Top issues:**\n"
+            + "\n".join(top_issues)
+        )
+
 
     def _full_autopilot(self) -> bool:
         emergency = self.plane.store.get_policy("CINESWARM_AUTO_EMERGENCY_STOP") or os.environ.get("CINESWARM_AUTO_EMERGENCY_STOP", "false")
@@ -289,9 +328,11 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
+        if lowered in ("monitor", "ops", "live_monitor"):
+            return self._monitor()
         if lowered == "decisions":
             return self._decision_history()
         if lowered.startswith("decision "):
@@ -487,6 +528,15 @@ class CineSwarmClient(discord.Client):
                 return
             await interaction.response.defer()
             resp = await asyncio.to_thread(self.service.handle, "status", interaction.user.id)
+            await interaction.followup.send(resp)
+
+        @self.tree.command(name="monitor", description="Live ops digest: overall health, queues, worker, and top issues")
+        async def slash_monitor(interaction: discord.Interaction):
+            if not self.service.authorized(interaction.user.id, interaction.guild.id if interaction.guild else None, interaction.channel_id):
+                await interaction.response.send_message("Unauthorized Discord identity.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            resp = await asyncio.to_thread(self.service.handle, "monitor", interaction.user.id)
             await interaction.followup.send(resp)
 
         @self.tree.command(name="budget", description="View current weekly acquisition budget telemetry")
