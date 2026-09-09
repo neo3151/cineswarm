@@ -289,7 +289,7 @@ class Worker:
             return False
 
     def _recover_never_imported(self) -> dict[str, Any]:
-        """Search at most one recent Radarr movie that was added but never imported."""
+        """Search a bounded number of recent Radarr movies that were added but never imported."""
         preferred = {"comedy", "animation", "action", "science fiction", "family"}
         gaps = self.plane.never_imported_movies(added_since_days=14, limit=20)
         candidates = list(gaps.get("recent") or [])
@@ -301,6 +301,7 @@ class Worker:
             reverse=True,
         )
         recovered = []
+        max_recover = max(1, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 2), 5))
         for item in candidates:
             service_id = item.get("service_id")
             if not service_id or not item.get("monitored"):
@@ -333,7 +334,8 @@ class Worker:
                     self.control_store.update_decision(decision_id, "failed", {"task_id": task_id, "error": str(exc)})
                 task_result.update({"status": "failed", "decision_id": decision_id, "error": str(exc)})
             recovered.append(task_result)
-            break
+            if len(recovered) >= max_recover:
+                break
         return {"count": int(gaps.get("count") or 0), "recovered": recovered}
 
     def _auto_refresh_allowed(self) -> bool:
@@ -825,7 +827,25 @@ class Worker:
             ):
                 never_imported = self._recover_never_imported()
                 approval_tasks.extend(never_imported.get("recovered") or [])
-            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}, "never_imported": never_imported}
+            av1_upgrades = {"queued": []}
+            if (
+                not pressure.get("pressured")
+                and hasattr(self.plane, "queue_av1_upgrade_searches")
+                and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
+            ):
+                av1_upgrades = self.plane.queue_av1_upgrade_searches(self._policy_int("CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", 3), actor="worker")
+                for item in av1_upgrades.get("queued") or []:
+                    task_id = item.get("task_id")
+                    if not task_id:
+                        continue
+                    try:
+                        self.plane.approve_task(task_id, "autonomous-recovery")
+                        item["status"] = "executed"
+                    except Exception as exc:
+                        item["status"] = "failed"
+                        item["error"] = str(exc)
+                    approval_tasks.append(item)
+            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}, "never_imported": never_imported, "av1_upgrades": av1_upgrades}
         if job_type == "media_health_scan":
             scan_res = self.plane.scan_media_health(limit=50, actor="worker", allow_automatic=getattr(self, "_startup_ready", True))
             if scan_res.get("corrupt_count", 0) > 0:

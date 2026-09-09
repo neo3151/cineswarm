@@ -28,8 +28,12 @@ class ProductizationHTTPTests(unittest.TestCase):
         self.store = ControlStore(self.database)
         Handler.plane = SimpleNamespace(
             store=self.store,
+            discovery=None,
             discovery_queue=lambda: [{"id": 1, "title": "Example"}],
             operational_queue=lambda limit=200: {**self.store.queue_detail(limit), "downloads": {"movies": {"records": [], "total_records": 0}, "series": {"records": [], "total_records": 0}}, "errors": {}},
+            evolution_engine=SimpleNamespace(process_plex_playback_event=lambda payload: {"action": "monitored", "title": (payload.get("Metadata") or {}).get("title")}),
+            user_profiles=SimpleNamespace(apply_plex_account=lambda name: {"active_profile": "kids"} if name else None),
+            log_decision=lambda *args, **kwargs: "dec-test",
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -37,20 +41,26 @@ class ProductizationHTTPTests(unittest.TestCase):
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.catalog_patch = patch("cineswarm_control.CATALOG_DB", self.catalog)
         self.catalog_patch.start()
+        self.auth_patch = patch.dict(os.environ, {"CINESWARM_DASHBOARD_USERNAME": "", "CINESWARM_DASHBOARD_PASSWORD": ""})
+        self.auth_patch.start()
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
         self.catalog_patch.stop()
+        self.auth_patch.stop()
         self.temporary.cleanup()
 
-    def request(self, path, credentials=None):
+    def request(self, path, credentials=None, method="GET", data=None, content_type=None):
         headers = {}
         if credentials:
             encoded = base64.b64encode(f"{credentials[0]}:{credentials[1]}".encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
-        request = urllib.request.Request(self.base_url + path, headers=headers)
+        if content_type:
+            headers["Content-Type"] = content_type
+        body = data if data is None or isinstance(data, bytes) else data.encode()
+        request = urllib.request.Request(self.base_url + path, data=body, headers=headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=2) as response:
                 return response.status, json.loads(response.read()) if path != "/" else response.read().decode(), response.headers
@@ -80,6 +90,28 @@ class ProductizationHTTPTests(unittest.TestCase):
             versioned, _, _ = self.request("/api/v1/health")
         self.assertEqual(unversioned, 503)
         self.assertEqual(versioned, unversioned)
+
+    def test_plex_webhook_accepts_unauthenticated_multipart(self):
+        configured = {"CINESWARM_DASHBOARD_USERNAME": "operator", "CINESWARM_DASHBOARD_PASSWORD": "password"}
+        boundary = "XXXX"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="payload"\r\n\r\n'
+            '{"event":"media.scrobble","Metadata":{"title":"Heat"},"Account":{"title":"Kids Tablet"}}\r\n'
+            f"--{boundary}--\r\n"
+        ).encode()
+        with patch.dict(os.environ, configured):
+            denied, _, _ = self.request("/api/refresh", method="POST", data=b"{}")
+            status, payload, _ = self.request(
+                "/api/webhooks/plex",
+                method="POST",
+                data=body,
+                content_type=f"multipart/form-data; boundary={boundary}",
+            )
+        self.assertEqual(denied, 401)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["event"], "media.scrobble")
+        self.assertEqual(payload["media"], "Heat")
 
     def test_read_only_v1_aliases_reuse_existing_responses(self):
         for route in ("status", "operational-summary?hours=1", "editions?limit=2", "discovery"):

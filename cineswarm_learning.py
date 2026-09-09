@@ -51,6 +51,13 @@ class AutonomicSwarmEvolutionEngine:
                         created_at TEXT NOT NULL
                     )
                 """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_taste_memory (
+                        key TEXT PRIMARY KEY,
+                        value_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
         except Exception:
             pass
 
@@ -71,7 +78,12 @@ class AutonomicSwarmEvolutionEngine:
         reward_score = 0.0
         action = "monitored"
 
-        if event_name in ("media.stop", "scrobble") or completion_pct >= 0.75:
+        if event_name in {"media.scrobble", "scrobble"}:
+            reward_score = 1.5
+            action = "granted_taste_reward"
+            if completion_pct <= 0:
+                completion_pct = 1.0
+        elif event_name == "media.stop" or completion_pct >= 0.75:
             if completion_pct >= 0.75:
                 reward_score = 1.5
                 action = "granted_taste_reward"

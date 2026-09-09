@@ -257,7 +257,7 @@ class DiscordService:
         subject = f"{candidate.get('title')} ({candidate.get('year') or 'n.d.'})"
         decision_id = self._record_decision(actor, "discovery_acquire", subject, "executed" if self._full_autopilot() else "pending", {"candidate_id": candidate_id, "score": candidate.get("score")}, {"task_id": result["task_id"]})
         if self._full_autopilot() or result.get("status") == "approved_and_executed":
-            return f"Autopilot acquired and searched **{subject}**. Decision `{decision_id}`."
+            return f"Autopilot acquired and searched **{subject}**. Decision `{decision_id}`.\nMark it with `!cine feedback {decision_id} good` or `bad` so discovery learns."
         return f"Proposed discovery candidate `{candidate_id}`. Decision `{decision_id}`. Confirm the add with `!cine confirm {result['task_id']}`."
 
     def _propose_movie(self, value: str, actor: str) -> str:
@@ -313,6 +313,25 @@ class DiscordService:
         feedback = next((entry.get("feedback") for entry in self.plane.store.decisions(100) if entry["decision_id"] == item["decision_id"]), None)
         return f"Decision `{item['decision_id']}`\nActor: {item['actor']}\nCategory: {item['category']}\nSubject: {item['subject']}\nDecision: **{item['decision']}**\nReasons: `{item['reasons']}`\nOutcome: `{item['outcome']}`\nFeedback: `{feedback or 'none'}`"
 
+    def _profile(self, value: str, actor: str) -> str:
+        profiles = getattr(self.plane, "user_profiles", None)
+        if not profiles:
+            return "Family profiles are not available."
+        if not value:
+            rows = profiles.list_all_profiles()
+            active = next((row for row in rows if row.get("is_active")), {})
+            lines = [f"**Active profile:** {active.get('display_name') or active.get('profile_id') or 'admin'}"]
+            for row in rows:
+                mark = " (active)" if row.get("is_active") else ""
+                lines.append(f"- `{row.get('profile_id')}` {row.get('display_name')} · max {row.get('max_certification')}{mark}")
+            lines.append("Switch with `!cine profile admin|partner|kids|guest`.")
+            return "\n".join(lines)
+        result = profiles.switch_active_profile(value)
+        if result.get("status") != "success":
+            return f"Could not switch profile. Use `admin`, `partner`, `kids`, or `guest`. {result.get('message') or ''}".strip()
+        current = profiles.get_active_profile()
+        return f"Active family profile is now **{current.get('display_name') or value}** (max {current.get('max_certification')}). Discovery and watch picks will use this rating ceiling."
+
     def _feedback(self, value: str, actor: str) -> str:
         parts = value.split(maxsplit=2)
         if len(parts) < 2 or parts[1].casefold() not in ("good", "bad"):
@@ -332,7 +351,7 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
         if lowered in ("monitor", "ops", "live_monitor"):
@@ -343,6 +362,8 @@ class DiscordService:
             return self._decision_detail(text[9:].strip())
         if lowered.startswith("feedback "):
             return self._feedback(text[9:].strip(), actor)
+        if lowered == "profile" or lowered.startswith("profile "):
+            return self._profile(text[7:].strip(), actor)
         if lowered == "queue":
             return self._queue_details()
         if lowered == "discover refresh":

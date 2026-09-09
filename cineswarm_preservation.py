@@ -377,7 +377,8 @@ def database_maintenance(control_db: str = CONTROL_DB, catalog_db: str = CATALOG
             result["status"] = "backed_up"
             results.append(result)
         removed = rotate_backups(backup_dir, retention)
-        details = {"databases": results, "removed": removed, "backup_dir": backup_dir}
+        offsite = sync_offsite_vault(backup_dir=backup_dir)
+        details = {"databases": results, "removed": removed, "backup_dir": backup_dir, "offsite": offsite}
         with sqlite3.connect(control_db) as connection:
             connection.execute("UPDATE database_maintenance_runs SET finished_at=?, status='completed', details_json=? WHERE run_id=?", (now(), json.dumps(details, sort_keys=True), run_id))
         return {"status": "completed", "run_id": run_id, **details}

@@ -31,7 +31,7 @@ The SQLite catalog is the complete collection; the markdown file intentionally c
 python3 cineswarm_control.py
 ```
 
-The dashboard is bound to the LAN address `192.168.1.23:8787` by the installed user service. Open `http://192.168.1.23:8787` from another device on the same LAN. To refresh once and exit:
+The dashboard is bound to the LAN address `192.168.1.23:8787` by the installed user service. Open `http://192.168.1.23:8787` from another device on the same LAN. Set `CINESWARM_DASHBOARD_USERNAME` and `CINESWARM_DASHBOARD_PASSWORD` in the untracked `.env`; health, monitoring snapshot, and Plex/SABnzbd webhooks stay unauthenticated. To refresh once and exit:
 
 ```bash
 python3 cineswarm_control.py --refresh
@@ -144,7 +144,7 @@ CINESWARM_DISCORD_PREFIX=!cine
 
 For one-time setup, start the bot with a random `CINESWARM_DISCORD_SETUP_CODE`, then send `!cine pair CODE` in the desired server channel. CineSwarm stores that server, channel, and user as the allowlist; the code cannot pair another identity afterward. To move later, the paired user can send `!cine move CODE` in a different channel in the same server; the old channel is immediately deauthorized.
 
-Mention the bot or use `!cine`. Commands are `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `decisions`, `decision ID`, and `feedback ID good|bad NOTE`. `queue` lists actual Radarr/Sonarr releases with states, progress, remaining size, time, and errors. Full autopilot executes paired-user add, acquire, search, and exact-grab requests immediately after revalidation, records every decision and warning override, and reports outcomes to Discord. Feedback is joined into future Gemini discovery context. Legacy `confirm` remains available for older pending tasks.
+Mention the bot or use `!cine`. Commands are `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, and `feedback ID good|bad NOTE`. `queue` lists actual Radarr/Sonarr releases with states, progress, remaining size, time, and errors. Full autopilot executes paired-user add, acquire, search, and exact-grab requests immediately after revalidation, records every decision and warning override, and reports outcomes to Discord. Feedback is joined into future Gemini discovery context. Family profiles change the rating ceiling and taste weights used by discovery. Legacy `confirm` remains available for older pending tasks.
 
 The `.devin/cineswarm-discord.service` unit runs the bot with systemd restart and watchdog protection.
 

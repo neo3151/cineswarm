@@ -30,7 +30,7 @@ class MultiUserTasteEngine:
             "display_name": "Partner",
             "max_certification": "R",
             "allowed_ratings": ["G", "PG", "PG-13", "R", "TV-14", "TV-MA"],
-            "taste_weights": {}
+            "taste_weights": {"comedy": 1.4, "romance": 1.4, "drama": 1.2}
         },
         "kids": {
             "display_name": "Kids Zone",
@@ -42,7 +42,7 @@ class MultiUserTasteEngine:
             "display_name": "Guest Lounge",
             "max_certification": "R",
             "allowed_ratings": ["G", "PG", "PG-13", "R"],
-            "taste_weights": {}
+            "taste_weights": {"comedy": 1.3, "animation": 1.2, "family": 1.2}
         }
     }
 
@@ -78,6 +78,14 @@ class MultiUserTasteEngine:
                             (p_id, p_data["display_name"], p_data["max_certification"],
                              json.dumps(p_data["allowed_ratings"]), json.dumps(p_data["taste_weights"]), is_act, now_iso)
                         )
+                now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                for p_id, p_data in self.DEFAULT_PROFILES.items():
+                    row = conn.execute("SELECT taste_weights_json FROM user_family_profiles WHERE profile_id=?", (p_id,)).fetchone()
+                    if row and (not row[0] or row[0] in ("{}", "null")) and p_data["taste_weights"]:
+                        conn.execute(
+                            "UPDATE user_family_profiles SET taste_weights_json=?, updated_at=? WHERE profile_id=?",
+                            (json.dumps(p_data["taste_weights"]), now_iso, p_id),
+                        )
         except Exception:
             pass
 
@@ -110,7 +118,30 @@ class MultiUserTasteEngine:
                     }
         except Exception:
             pass
-        return self.DEFAULT_PROFILES["admin"]
+        admin = {"profile_id": "admin", **self.DEFAULT_PROFILES["admin"]}
+        return admin
+
+    def apply_plex_account(self, account_name: str) -> dict[str, Any] | None:
+        """Switch the active profile when a Plex account is mapped in CINESWARM_PLEX_PROFILE_MAP."""
+        import os
+        raw = os.environ.get("CINESWARM_PLEX_PROFILE_MAP", "")
+        mapping: dict[str, str] = {}
+        for item in raw.split(","):
+            if "=" not in item:
+                continue
+            plex_name, profile_id = item.split("=", 1)
+            mapping[plex_name.strip().casefold()] = profile_id.strip().lower()
+        profile_id = mapping.get(str(account_name or "").strip().casefold())
+        if not profile_id:
+            return None
+        return self.switch_active_profile(profile_id)
+
+    def allows_certification(self, certification: str | None, profile: dict[str, Any] | None = None) -> bool:
+        profile = profile or self.get_active_profile()
+        allowed = {str(item).casefold() for item in (profile.get("allowed_ratings") or [])}
+        if not certification or not allowed:
+            return True
+        return str(certification).casefold() in allowed or "unrated" in allowed
 
     def list_all_profiles(self) -> list[dict[str, Any]]:
         """List all registered family user profiles."""

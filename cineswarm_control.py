@@ -84,6 +84,8 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_PRESERVATION_ROOTS", "CINESWARM_PRESERVATION_UNION_ROOTS", "CINESWARM_PRESERVATION_BRANCHES", "CINESWARM_PRESERVATION_MOUNTS",
     "CINESWARM_PRESERVATION_SAMPLE_LIMIT", "CINESWARM_PRESERVATION_CHECKSUM_BYTES", "CINESWARM_PRESERVATION_CHECKSUM_MAX_SIZE",
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
+    "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
+    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
 
@@ -1590,6 +1592,122 @@ class ControlPlane:
             "client_device": "Samsung Galaxy Tab S9 FE"
         }
 
+    def ensure_plex_webhook(self) -> dict[str, Any]:
+        """Register the local playback webhook so Plex scrobbles train taste memory."""
+        url = os.environ.get("CINESWARM_PLEX_WEBHOOK_URL", "http://192.168.1.23:8787/api/webhooks/plex").strip()
+        plex = self.writers.get("plex") if getattr(self, "writers", None) else None
+        if plex is None:
+            plex = getattr(self, "plex", None)
+        if plex is None or not url:
+            return {"status": "skipped", "reason": "plex_or_url_missing", "url": url}
+        try:
+            existing = plex.get(":/webhooks")
+            urls = [elem.get("url") or (elem.text or "") for elem in existing.iter() if (elem.get("url") or (elem.text or "")).startswith("http")]
+            if any(item.rstrip("/") == url.rstrip("/") for item in urls):
+                return {"status": "already_registered", "url": url, "known": urls[:8], "via": "local"}
+            if hasattr(plex, "post"):
+                plex.post(":/webhooks", {"url": url})
+            else:
+                return self._ensure_plex_tv_webhook(url, plex)
+            return {"status": "registered", "url": url, "via": "local"}
+        except Exception as exc:
+            if "404" in str(exc) or "HTTP 404" in str(exc):
+                return self._ensure_plex_tv_webhook(url, plex)
+            return {"status": "error", "url": url, "error": str(exc)}
+
+    def _ensure_plex_tv_webhook(self, url: str, plex: Any) -> dict[str, Any]:
+        """Plex webhooks live on the account API; local :/webhooks is often 404."""
+        token = getattr(getattr(plex, "config", None), "api_key", None) or os.environ.get("PLEX_TOKEN", "")
+        if not token:
+            return {"status": "error", "url": url, "error": "plex_token_missing", "via": "plex.tv"}
+        endpoint = "https://plex.tv/api/v2/user/webhooks"
+        headers = {
+            "X-Plex-Token": token,
+            "X-Plex-Client-Identifier": "cineswarm-control",
+            "X-Plex-Product": "CineSwarm",
+            "Accept": "application/json",
+        }
+        try:
+            request = urllib.request.Request(endpoint, headers=headers, method="GET")
+            with urllib.request.urlopen(request, timeout=15) as response:
+                raw = response.read().decode("utf-8", "replace")
+            known = self._parse_plex_tv_webhook_urls(raw)
+            if any(item.rstrip("/") == url.rstrip("/") for item in known):
+                return {"status": "already_registered", "url": url, "known": known[:8], "via": "plex.tv"}
+            payload = urllib.parse.urlencode([("urls[]", item) for item in known + [url]]).encode()
+            request = urllib.request.Request(endpoint, data=payload, headers={**headers, "Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+            with urllib.request.urlopen(request, timeout=15) as response:
+                response.read()
+            return {"status": "registered", "url": url, "via": "plex.tv", "known": known[:8]}
+        except urllib.error.HTTPError as exc:
+            return {"status": "error", "url": url, "via": "plex.tv", "error": f"plex.tv returned HTTP {exc.code}"}
+        except (urllib.error.URLError, TimeoutError, UnicodeDecodeError) as exc:
+            return {"status": "error", "url": url, "via": "plex.tv", "error": exc.__class__.__name__}
+
+    @staticmethod
+    def _parse_plex_tv_webhook_urls(raw: str) -> list[str]:
+        urls: list[str] = []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+                elif isinstance(item, dict) and str(item.get("url") or "").startswith("http"):
+                    urls.append(str(item["url"]))
+        elif isinstance(parsed, dict):
+            for item in parsed.get("webhooks") or parsed.get("urls") or []:
+                if isinstance(item, str) and item.startswith("http"):
+                    urls.append(item)
+                elif isinstance(item, dict) and str(item.get("url") or "").startswith("http"):
+                    urls.append(str(item["url"]))
+        if urls:
+            return urls
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            return []
+        for elem in root.iter():
+            candidate = elem.get("url") or (elem.text or "")
+            if candidate.startswith("http"):
+                urls.append(candidate)
+        return urls
+
+    def queue_av1_upgrade_searches(self, limit: int = 3, actor: str = "worker") -> dict[str, Any]:
+        """Create a bounded Radarr search for existing AV1 files so they can be replaced with HEVC/H.264."""
+        limit = max(0, min(int(limit), 10))
+        if limit == 0 or not os.path.exists(CATALOG_DB):
+            return {"status": "skipped", "queued": []}
+        rows = []
+        try:
+            with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """SELECT title, year, source_native_id, size_mb FROM catalog_items
+                       WHERE present=1 AND LOWER(COALESCE(video_codec,'')) LIKE '%av1%' AND source_native_id IS NOT NULL
+                       ORDER BY size_mb DESC LIMIT ?""",
+                    (limit * 4,),
+                ).fetchall()
+        except sqlite3.Error:
+            return {"status": "error", "queued": []}
+        queued = []
+        for row in rows:
+            if len(queued) >= limit:
+                break
+            service_id = row["source_native_id"]
+            parent = f"av1-upgrade:{service_id}"
+            if self.store.task_exists("radarr_search_request", parent):
+                continue
+            task_id = self.store.create_task(
+                "radarr_search_request",
+                actor,
+                {"media_type": "movie", "service_id": service_id, "parent_task_id": parent, "reason": "Replace unaccelerated AV1 for Tab S9 FE"},
+            )
+            queued.append({"task_id": task_id, "title": row["title"], "year": row["year"], "service_id": service_id})
+        return {"status": "queued" if queued else "none_needed", "queued": queued}
+
     def never_imported_movies(self, added_since_days: int | None = 14, limit: int = 25) -> dict[str, Any]:
         """Radarr-managed movies in the catalog that still have no file size (never imported)."""
         empty = {"count": 0, "recent": [], "genre_counts": {}, "added_since_days": added_since_days}
@@ -1875,6 +1993,9 @@ class ControlPlane:
         # Use full-vault semantic index
         search_query = f"{genre} movie".strip() if genre else "popular classic film"
         candidates = self.semantic_index.search(search_query, top_n=40, max_minutes=max_minutes, max_size_gb=max_size_gb)
+        if getattr(self, "user_profiles", None):
+            profile = self.user_profiles.get_active_profile()
+            candidates = [item for item in candidates if self.user_profiles.allows_certification(item.get("certification") or item.get("contentRating") or item.get("content_rating"), profile)]
 
         if not self.agents or not self.agents.model.configured or not candidates:
             picks = candidates[:limit]
@@ -3753,10 +3874,52 @@ class Handler(BaseHTTPRequestHandler):
         self._send(401, {"error": "authentication_required"}, headers={"WWW-Authenticate": 'Basic realm="CineSwarm", charset="UTF-8"'})
         return False
 
+    @staticmethod
+    def _public_path(path: str, method: str) -> bool:
+        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot"}
+        public_post = {"/api/webhooks/plex", "/api/webhooks/sabnzbd"}
+        if method == "GET":
+            return path in public_get
+        return path in public_post
+
+    @staticmethod
+    def _multipart_form_field(raw: bytes, content_type: str, name: str) -> str:
+        match = re.search(r"boundary=([^;]+)", content_type or "", re.I)
+        if not match:
+            return ""
+        boundary = match.group(1).strip().strip('"').encode()
+        marker = f'name="{name}"'.encode()
+        for part in raw.split(b"--" + boundary):
+            if marker not in part:
+                continue
+            _, _, body = part.partition(b"\r\n\r\n")
+            return body.rsplit(b"\r\n", 1)[0].decode("utf-8", "replace")
+        return ""
+
+    def _read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        raw = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type") or ""
+        if "multipart/" in content_type.lower():
+            field = self._multipart_form_field(raw, content_type, "payload")
+            if field:
+                try:
+                    parsed = json.loads(field)
+                    return parsed if isinstance(parsed, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         requested_path = parsed.path
-        if requested_path not in {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot"} and not self._require_authentication():
+        if not self._public_path(requested_path, "GET") and not self._require_authentication():
             return
         canonical_path = READ_ONLY_V1_ALIASES.get(requested_path, requested_path)
         self.path = canonical_path + (("?" + parsed.query) if parsed.query else "")
@@ -4034,7 +4197,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not_found"})
 
     def do_POST(self) -> None:
-        if not self._require_authentication():
+        requested_path = urllib.parse.urlparse(self.path).path
+        if not self._public_path(requested_path, "POST") and not self._require_authentication():
             return
         if self.path == "/api/refresh":
             self._send(200, self.plane.refresh("dashboard"))
@@ -4238,16 +4402,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, result)
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
-        elif self.path == "/api/webhooks/plex":
-            length = int(self.headers.get("Content-Length", "0"))
+        elif requested_path == "/api/webhooks/plex":
             try:
-                payload = json.loads(self.rfile.read(length) or b"{}")
+                payload = self._read_json_body()
                 event = payload.get("event", "media.play")
                 movie = (payload.get("Metadata") or {}).get("title", "Unknown")
+                account = ((payload.get("Account") or {}).get("title") or (payload.get("Account") or {}).get("name") or "")
+                if account and hasattr(self.plane, "user_profiles"):
+                    self.plane.user_profiles.apply_plex_account(str(account))
                 res_telemetry = self.plane.evolution_engine.process_plex_playback_event(payload)
-                self.plane.log_decision("webhook_plex", movie, "recorded", {"event": event}, res_telemetry)
+                if event in {"media.scrobble", "media.stop"} and self.plane.discovery:
+                    try:
+                        res_telemetry["rescored_candidates"] = int(self.plane.discovery.rescore_open_candidates() or 0)
+                    except Exception:
+                        pass
+                self.plane.log_decision("webhook_plex", movie, "recorded", {"event": event, "account": account}, res_telemetry)
                 self._send(200, {"status": "received", "event": event, "media": movie, "reinforcement_telemetry": res_telemetry})
-            except Exception as exc:
+            except Exception:
                 self._send(200, {"status": "ingested"})
 
         elif self.path == "/api/webhooks/sabnzbd":
@@ -4574,6 +4745,11 @@ def main() -> None:
     parser.add_argument("--refresh", action="store_true", help="Refresh service snapshots and exit.")
     args = parser.parse_args()
     plane = make_plane()
+    try:
+        webhook = plane.ensure_plex_webhook()
+        plane.store.audit("startup", "plex_webhook_ensure", "plex", "local-write", webhook.get("status") or "unknown", webhook)
+    except Exception as exc:
+        print(f"Plex webhook registration skipped: {exc}", flush=True)
     if args.refresh:
         print(json_text(plane.refresh("cli")))
         return

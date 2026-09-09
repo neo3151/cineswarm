@@ -8,10 +8,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from cineswarm_agents import AcquisitionPlanner, PlaybackHistory, ReadOnlyTools
-from cineswarm_control import ControlPlane, ControlStore, LOCAL_ENV_KEYS, PlexConnector, Policy, service_error_message
+from cineswarm_control import ControlPlane, ControlStore, Handler, LOCAL_ENV_KEYS, PlexConnector, Policy, ServiceError, service_error_message
 from cineswarm_discovery import DiscoveryEngine
 from cineswarm_discord import DiscordService
-from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups
+from cineswarm_learning import AutonomicSwarmEvolutionEngine
+from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups, sync_offsite_vault
+from cineswarm_user_profiles import MultiUserTasteEngine
 from cineswarm_worker import Worker, WorkerStore
 
 
@@ -21,7 +23,7 @@ class FakeArrClient:
         self.put_calls = []
         self.post_calls = []
 
-    def get(self, path, params=None):
+    def get(self, path, params=None, timeout=None):
         if path == "api/v3/queue":
             return self.queue
         if path == "api/v3/qualityprofile":
@@ -317,6 +319,17 @@ class DiscordServiceTests(unittest.TestCase):
         self.assertTrue(service.authorized(3, 1, 9))
         self.assertEqual(policies["CINESWARM_DISCORD_CHANNEL_IDS"], "9")
 
+    def test_profile_command_lists_and_switches_family_profiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = MultiUserTasteEngine(os.path.join(directory, "control.db"))
+            plane = SimpleNamespace(user_profiles=engine)
+            listed = DiscordService(plane).handle("profile", 3)
+            switched = DiscordService(plane).handle("profile kids", 3)
+            self.assertIn("Kids Zone", listed)
+            self.assertIn("`admin`", listed)
+            self.assertIn("Kids Zone", switched)
+            self.assertEqual(engine.get_active_profile()["profile_id"], "kids")
+
     def test_queue_command_lists_actual_downloads_and_progress(self):
         queue = {"totalRecords": 1, "records": [{"title": "Movie.2020.1080p", "status": "downloading", "trackedDownloadState": "downloading", "size": 100, "sizeleft": 25, "timeleft": "00:10:00", "errorMessage": ""}]}
         client = SimpleNamespace(get=lambda path, params=None: queue)
@@ -522,6 +535,22 @@ class DiscoveryTests(unittest.TestCase):
 
         self.assertGreater(comedy_score["watch_affinity_score"], drama_score["watch_affinity_score"])
         self.assertGreater(comedy_score["overall_score"], drama_score["overall_score"])
+
+    def test_kids_profile_penalizes_disallowed_certification(self):
+        engine = DiscoveryEngine.__new__(DiscoveryEngine)
+        candidate = {"title": "Hard R", "year": 2004, "tmdbId": 3, "genres": ["Comedy"], "runtime": 100, "certification": "R"}
+        profile = {
+            "source": "playback_history",
+            "top_genres": [("Comedy", 200.0)],
+            "top_decades": [("2000s", 100.0)],
+            "decision_feedback": [],
+            "family_profile": {"profile_id": "kids", "allowed_ratings": ["G", "PG", "PG-13"], "taste_weights": {"comedy": 1.5}},
+        }
+        allowed = {**candidate, "certification": "PG"}
+        self.assertGreater(
+            engine._score_components(allowed, profile)["overall_score"],
+            engine._score_components(candidate, profile)["overall_score"],
+        )
 
     def test_implicit_watch_feedback_seeds_once(self):
         engine = DiscoveryEngine.__new__(DiscoveryEngine)
@@ -918,11 +947,32 @@ class WorkerTests(unittest.TestCase):
             },
             approve_task=lambda task_id, actor: {"result": {"id": 77}},
         )
-        result = worker._recover_never_imported()
+        with patch.dict("os.environ", {"CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE": "1"}):
+            result = worker._recover_never_imported()
         self.assertEqual(result["count"], 2)
         self.assertEqual(len(result["recovered"]), 1)
         self.assertEqual(result["recovered"][0]["service_id"], 9)
         self.assertEqual(store.tasks[0][0], "radarr_search_request")
+
+    def test_never_imported_recovery_respects_cycle_cap(self):
+        worker = Worker.__new__(Worker)
+        store = FakeControlStore()
+        store.record_decision = lambda *args, **kwargs: "decision-gap"
+        store.update_decision = lambda *args, **kwargs: None
+        worker.control_store = store
+        worker.plane = SimpleNamespace(
+            never_imported_movies=lambda added_since_days=14, limit=20: {
+                "count": 2,
+                "recent": [
+                    {"title": "Drama Stub", "service_id": 2, "monitored": True, "added": "2026-09-01", "genres": ["Drama"]},
+                    {"title": "Muppets from Space", "service_id": 9, "monitored": True, "added": "2026-09-08", "genres": ["Comedy"]},
+                ],
+            },
+            approve_task=lambda task_id, actor: {"result": {"id": 77}},
+        )
+        with patch.dict("os.environ", {"CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE": "2"}):
+            result = worker._recover_never_imported()
+        self.assertEqual([item["service_id"] for item in result["recovered"]], [9, 2])
 
     def test_emergency_stop_blocks_failed_download_recovery(self):
         worker = Worker.__new__(Worker)
@@ -1083,7 +1133,15 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_WORKER_POLL_SECONDS",
             "CINESWARM_DISCOVERY_ENABLED",
             "CINESWARM_NOTIFICATION_WEBHOOK",
+            "CINESWARM_MONITOR_WEBHOOK",
             "CINESWARM_DISCORD_WEBHOOK",
+            "CINESWARM_DASHBOARD_USERNAME",
+            "CINESWARM_DASHBOARD_PASSWORD",
+            "CINESWARM_PLEX_WEBHOOK_URL",
+            "CINESWARM_PLEX_PROFILE_MAP",
+            "CINESWARM_OFFSITE_VAULT_TARGET",
+            "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE",
+            "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
             "CINESWARM_NOTIFICATION_COOLDOWN",
             "CINESWARM_HEARTBEAT_STALE_SECONDS",
             "CINESWARM_AUTONOMOUS_INTERVAL",
@@ -1142,6 +1200,103 @@ class AIEnrichmentTests(unittest.TestCase):
         srt = TriviaCommentaryAgent.export_srt(markers)
         self.assertIn("00:01:30,000 --> 00:01:45,000", srt)
         self.assertIn("[TRIVIA] Director: This scene was shot in one continuous take.", srt)
+
+
+class HouseholdCatchupTests(unittest.TestCase):
+    def test_multipart_plex_payload_field(self):
+        raw = (
+            b"--XXXX\r\n"
+            b'Content-Disposition: form-data; name="payload"\r\n'
+            b"Content-Type: application/json\r\n\r\n"
+            b'{"event":"media.scrobble","Metadata":{"title":"Heat"}}\r\n'
+            b"--XXXX--\r\n"
+        )
+        field = Handler._multipart_form_field(raw, "multipart/form-data; boundary=XXXX", "payload")
+        self.assertEqual(json.loads(field)["Metadata"]["title"], "Heat")
+
+    def test_ensure_plex_webhook_registers_once(self):
+        posts = []
+        existing = ET.fromstring("<MediaContainer></MediaContainer>")
+        plex = SimpleNamespace(get=lambda path: existing, post=lambda path, params=None: posts.append((path, params)) or ET.Element("MediaContainer"))
+        plane = ControlPlane.__new__(ControlPlane)
+        plane.writers = {"plex": plex}
+        with patch.dict("os.environ", {"CINESWARM_PLEX_WEBHOOK_URL": "http://127.0.0.1:8787/api/webhooks/plex"}):
+            first = plane.ensure_plex_webhook()
+            existing.append(ET.Element("Webhook", url="http://127.0.0.1:8787/api/webhooks/plex"))
+            second = plane.ensure_plex_webhook()
+        self.assertEqual(first["status"], "registered")
+        self.assertEqual(second["status"], "already_registered")
+        self.assertEqual(posts, [(":/webhooks", {"url": "http://127.0.0.1:8787/api/webhooks/plex"})])
+
+    def test_ensure_plex_webhook_falls_back_to_plex_tv(self):
+        def boom(path):
+            raise ServiceError("plex returned HTTP 404")
+
+        plex = SimpleNamespace(get=boom, config=SimpleNamespace(api_key="token"))
+        plane = ControlPlane.__new__(ControlPlane)
+        plane.writers = {"plex": plex}
+        get_body = json.dumps([{"url": "http://other.example/hook"}]).encode()
+        posts = []
+
+        class FakeResponse:
+            def __init__(self, body=b"[]"):
+                self.body = body
+            def read(self):
+                return self.body
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        def fake_urlopen(request, timeout=15):
+            if request.get_method() == "GET":
+                return FakeResponse(get_body)
+            posts.append(request.data.decode())
+            return FakeResponse(b"[]")
+
+        with patch.dict("os.environ", {"CINESWARM_PLEX_WEBHOOK_URL": "http://192.168.1.23:8787/api/webhooks/plex"}):
+            with patch("cineswarm_control.urllib.request.urlopen", fake_urlopen):
+                result = plane.ensure_plex_webhook()
+        self.assertEqual(result["status"], "registered")
+        self.assertEqual(result["via"], "plex.tv")
+        self.assertIn("urls%5B%5D=http%3A%2F%2Fother.example%2Fhook", posts[0])
+        self.assertIn("192.168.1.23", posts[0])
+
+    def test_offsite_vault_copies_local_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backup_dir = os.path.join(directory, "backups")
+            vault = os.path.join(directory, "vault")
+            os.makedirs(backup_dir)
+            os.makedirs(vault)
+            name = "cineswarm-control-20260909T120000Z-abcd1234.sqlite3"
+            with open(os.path.join(backup_dir, name), "wb") as handle:
+                handle.write(b"backup")
+            result = sync_offsite_vault(backup_dir=backup_dir, vault_target=vault)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["copied_files"], [name])
+            self.assertTrue(os.path.isfile(os.path.join(vault, name)))
+
+    def test_plex_scrobble_rewards_genres(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control_db = os.path.join(directory, "control.db")
+            catalog_db = os.path.join(directory, "catalog.db")
+            engine = AutonomicSwarmEvolutionEngine(control_db, catalog_db)
+            result = engine.process_plex_playback_event({
+                "event": "media.scrobble",
+                "Metadata": {"title": "The Big Lebowski", "year": 1998, "Genre": [{"tag": "Comedy"}]},
+            })
+            self.assertEqual(result["action"], "granted_taste_reward")
+            with sqlite3.connect(control_db) as connection:
+                learned = json.loads(connection.execute("SELECT value_json FROM user_taste_memory WHERE key='learned_taste_profile'").fetchone()[0])
+            self.assertGreater(learned["comedy"], 1.0)
+
+    def test_plex_account_map_switches_family_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = MultiUserTasteEngine(os.path.join(directory, "control.db"))
+            with patch.dict("os.environ", {"CINESWARM_PLEX_PROFILE_MAP": "Kids Tablet=kids"}):
+                switched = engine.apply_plex_account("Kids Tablet")
+            self.assertEqual(switched["active_profile"], "kids")
+            self.assertFalse(engine.allows_certification("R"))
 
 
 if __name__ == "__main__":

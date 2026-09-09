@@ -116,6 +116,8 @@ or mention the bot:
 | `!cine chapters TITLE` | Generate narrative chapter markers & scene summaries (WebVTT) | No |
 | `!cine decisions` | Show the latest decision ledger entries | No |
 | `!cine decision DECISION_ID` | Show reasons and outcome for one decision | No |
+| `!cine profile` | Show family profiles and the active rating ceiling | No |
+| `!cine profile admin|partner|kids|guest` | Switch the active family profile for discovery and Watch Tonight | Local profile only |
 | `!cine feedback DECISION_ID good|bad NOTE` | Record preference feedback for future discovery context | Local learning data |
 | `!cine confirm TASK_ID` | Legacy/manual confirmation for tasks created outside full autopilot | Yes |
 | `!cine pair CODE` | Pair the initial server, channel, and user | Configuration |
@@ -492,7 +494,16 @@ Record whether a decision was useful:
 !cine feedback DECISION_ID bad Wrong tone for my library
 ```
 
-Feedback is joined into future Gemini discovery context, creating a persistent preference history without weakening safety controls.
+Feedback is joined into future Gemini discovery context, creating a persistent preference history without weakening safety controls. Plex playback webhooks also train the same loop: finishing a title rewards its genres, and `media.scrobble` / `media.stop` rescore open discovery candidates.
+
+Switch whose taste and rating ceiling discovery uses:
+
+```text
+!cine profile
+!cine profile kids
+```
+
+`kids` keeps G / PG / PG-13 (and TV-G / TV-Y / TV-7). Map Plex account names with `CINESWARM_PLEX_PROFILE_MAP=Kids=kids` so a webhook from that account switches automatically.
 
 ---
 
@@ -503,6 +514,10 @@ Open:
 ```text
 http://192.168.1.23:8787
 ```
+
+The dashboard uses HTTP Basic Auth when `CINESWARM_DASHBOARD_USERNAME` and `CINESWARM_DASHBOARD_PASSWORD` are set. `/api/health`, `/api/monitoring/snapshot`, `/api/webhooks/plex`, and `/api/webhooks/sabnzbd` stay reachable without credentials so Uptime Kuma and Plex/SABnzbd callbacks keep working.
+
+Register the Plex playback webhook as the LAN dashboard URL (`http://192.168.1.23:8787/api/webhooks/plex`). Control is bound to that address, so `127.0.0.1` will miss. On startup CineSwarm registers the URL on the Plex account webhook API (`plex.tv`); local `:/webhooks` is often missing. Plex Pass is required for playback webhooks.
 
 ### Main controls
 
@@ -590,7 +605,11 @@ Example payload:
 }
 ```
 
-This webhook is independent of Discord chat alerts (`CINESWARM_DISCORD_WEBHOOK` / `CINESWARM_NOTIFICATION_WEBHOOK`). Use it for PagerDuty, ntfy, Slack incoming webhooks, or custom collectors.
+This webhook is independent of Discord chat alerts (`CINESWARM_DISCORD_WEBHOOK` / `CINESWARM_NOTIFICATION_WEBHOOK`). Use it for PagerDuty, ntfy, Slack incoming webhooks, or custom collectors. If `CINESWARM_MONITOR_WEBHOOK` is empty, the Discord webhook URL is a valid same-channel fallback.
+
+### Offsite / second-copy vault
+
+Daily database maintenance copies `cineswarm-control-*.sqlite3` and `cineswarm-catalog-*.sqlite3` into `backups/`, then mirrors matching files to `CINESWARM_OFFSITE_VAULT_TARGET` (a second mount or a local `backups/vault` directory). Cloud `s3://` / `gs://` targets need the host `gcloud` CLI. This is a database copy only; media files are never moved.
 
 The Overview dashboard includes a Monitoring snapshot card with overall status, queue counts, last alert, and a link to `/api/monitoring/snapshot`.
 
@@ -764,7 +783,7 @@ cd /home/neo/workspace/cineswarm
 .venv/bin/python -m unittest -v
 ```
 
-The current suite contains **37 tests** covering catalog identifiers, Plex parsing, discovery deduplication and acquisition, acquisition safety, detailed queue formatting, exact-release grabs, worker budgets, queue monitoring, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
+The current suite contains **95 tests** covering catalog identifiers, Plex parsing, discovery scoring, family profiles, Plex webhook ingest, offsite backup copy, acquisition safety, dashboard auth, worker budgets, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
 
 ### View recent logs
 

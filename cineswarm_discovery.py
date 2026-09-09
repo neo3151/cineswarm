@@ -152,6 +152,21 @@ class DiscoveryEngine:
         except sqlite3.Error:
             return []
 
+    def _active_family_profile(self) -> dict[str, Any]:
+        try:
+            with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute("SELECT * FROM user_family_profiles WHERE is_active=1 LIMIT 1").fetchone()
+            if not row:
+                return {}
+            return {
+                "profile_id": row["profile_id"],
+                "allowed_ratings": json.loads(row["allowed_ratings_json"] or "[]"),
+                "taste_weights": {str(key).casefold(): float(value) for key, value in json.loads(row["taste_weights_json"] or "{}").items()},
+            }
+        except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError):
+            return {}
+
     def _learned_taste_profile(self) -> dict[str, float]:
         """Load Plex-webhook RL genre weights from user_taste_memory."""
         try:
@@ -184,7 +199,7 @@ class DiscoveryEngine:
                     titles = []
                     with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
                         titles = [f"{row[0]} ({row[1] or 'n.d.'})" for row in connection.execute("SELECT title, year FROM catalog_items WHERE present=1 ORDER BY title LIMIT 150")]
-                    profile = {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": {**learned, **self._learned_taste_profile()}, "source": "playback_history"}
+                    profile = {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": {**learned, **self._learned_taste_profile()}, "family_profile": self._active_family_profile(), "source": "playback_history"}
                     self._persist_watch_first(profile)
                     profile["learned_taste_profile"] = self._learned_taste_profile() or profile["learned_taste_profile"]
                     profile["decision_feedback"] = self._decision_feedback()
@@ -207,7 +222,7 @@ class DiscoveryEngine:
         titles = []
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
             titles = [f"{row[0]} ({row[1] or 'n.d.'})" for row in connection.execute("SELECT title, year FROM catalog_items WHERE present=1 ORDER BY title LIMIT 150")]
-        return {"top_genres": genres.most_common(12), "top_decades": decades.most_common(8), "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": learned, "source": "catalog"}
+        return {"top_genres": genres.most_common(12), "top_decades": decades.most_common(8), "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": learned, "family_profile": self._active_family_profile(), "source": "catalog"}
     def _existing_keys(self) -> set[str]:
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
             keys = {row[0] for row in connection.execute("SELECT source_id FROM catalog_items WHERE present=1")}
@@ -415,10 +430,23 @@ class DiscoveryEngine:
         year = candidate.get("year")
         genre_shares = {key.casefold(): value for key, value in self._relative_weights(profile.get("top_genres", [])).items()}
         genre_points = min(45.0, sum(genre_shares.get(genre.casefold(), 0.0) * 90.0 for genre in genres))
-        learned = profile.get("learned_taste_profile") or {}
+        family = profile.get("family_profile") or {}
+        family_weights = family.get("taste_weights") if isinstance(family, dict) else {}
+        learned = dict(profile.get("learned_taste_profile") or {})
+        if isinstance(family_weights, dict):
+            for key, value in family_weights.items():
+                try:
+                    learned[str(key).casefold()] = max(float(learned.get(str(key).casefold()) or 0), float(value))
+                except (TypeError, ValueError):
+                    continue
         learned_points = 0.0
         if isinstance(learned, dict) and genre_keys:
             learned_points = min(12.0, sum(max(-2.0, min(4.0, float(learned.get(genre, 0) or 0) - 1.0)) * 3.0 for genre in genre_keys))
+        certification = str(candidate.get("certification") or candidate.get("contentRating") or "").strip()
+        allowed_ratings = {str(item).casefold() for item in (family.get("allowed_ratings") or []) if item}
+        rating_penalty = 0.0
+        if certification and allowed_ratings and certification.casefold() not in allowed_ratings and "unrated" not in allowed_ratings:
+            rating_penalty = 25.0
         decade_points = 0.0
         if isinstance(year, int):
             decade_shares = self._relative_weights(profile.get("top_decades", []))
@@ -496,6 +524,7 @@ class DiscoveryEngine:
             + rarity_preservation * weights[2]
             + storage_cost * weights[3]
             + acquisition_confidence * weights[4]
+            - rating_penalty
         )
         blend = "50/12/13/10/15 watch-first" if watch_first else "35/20/20/10/15 component blend"
         reasons = [
@@ -575,7 +604,7 @@ class DiscoveryEngine:
                 if (stable_id in existing or title_exists) and (not edition_key or edition_key in existing_editions):
                     continue
                 
-                candidate = {key: match.get(key) for key in ("tmdbId", "imdbId", "tvdbId", "title", "year", "overview", "genres", "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "director", "actors", "collection", "collectionTitle", "size_gb", "releaseTitle", "sourceTitle") if key in match}
+                candidate = {key: match.get(key) for key in ("tmdbId", "imdbId", "tvdbId", "title", "year", "overview", "genres", "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "director", "actors", "collection", "collectionTitle", "size_gb", "releaseTitle", "sourceTitle", "certification", "contentRating") if key in match}
                 candidate["edition"] = edition
                 candidate["reason"] = raw.get("reason", "")
                 scores = self._score_components(candidate, profile)
@@ -677,7 +706,7 @@ class DiscoveryEngine:
                 if stable_id in existing or str(match.get("title", "")).strip().casefold() in existing_titles:
                     continue
                 
-                candidate = {key: match.get(key) for key in ("tmdbId", "imdbId", "tvdbId", "title", "year", "overview", "genres", "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "director", "actors", "collection", "collectionTitle", "size_gb", "releaseTitle", "sourceTitle") if key in match}
+                candidate = {key: match.get(key) for key in ("tmdbId", "imdbId", "tvdbId", "title", "year", "overview", "genres", "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "director", "actors", "collection", "collectionTitle", "size_gb", "releaseTitle", "sourceTitle", "certification", "contentRating") if key in match}
                 candidate["franchise_name"] = raw.get("franchise_name")
                 candidate["reason"] = raw.get("reason", "")
                 scores = self._score_components(candidate, profile)
