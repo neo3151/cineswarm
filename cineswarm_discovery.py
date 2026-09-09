@@ -621,7 +621,84 @@ class DiscoveryEngine:
                     (candidate_key, media_type, candidate["title"], candidate.get("year"), json.dumps({id_key: match[id_key]}), json.dumps(candidate.get("genres", [])), score, scores["watch_affinity_score"], scores["collection_significance_score"], scores["rarity_preservation_score"], scores["storage_cost_score"], scores["acquisition_confidence_score"], scores["overall_score"], json.dumps(scores["score_reasons"], sort_keys=True), raw.get("reason", "Collection fit"), json.dumps(candidate), edition, quality, now, now),
                 )
                 inserted.append({"id": connection.execute("SELECT id FROM discovery_candidates WHERE candidate_key=?", (candidate_key,)).fetchone()[0], "title": candidate["title"], "media_type": media_type, "score": score})
-        return {"generated": len(generated), "inserted": len(inserted), "candidates": inserted}
+        fallback: list[dict[str, Any]] = []
+        if len(inserted) < max(5, limit // 2):
+            fallback = self.taste_lookup_fallback(profile, limit=max(5, limit - len(inserted)))
+            inserted.extend(fallback)
+        return {"generated": len(generated), "inserted": len(inserted), "candidates": inserted, "fallback_inserted": len(fallback)}
+
+    def _ingest_match(self, match: dict[str, Any], media_type: str, profile: dict[str, Any], reason: str, existing: set[str], existing_titles: set[str], existing_editions: set[str]) -> dict[str, Any] | None:
+        id_key = "tmdbId" if media_type == "movie" else "tvdbId"
+        if not match.get(id_key):
+            return None
+        stable_id = self._stable_key(media_type, match)
+        edition = self.tools._extract_edition(match) or self.tools._extract_quality(match)
+        title_exists = str(match.get("title", "")).strip().casefold() in existing_titles
+        edition_key = f"{stable_id}|{str(edition).strip().casefold()}" if edition else None
+        if (stable_id in existing or title_exists) and (not edition_key or edition_key in existing_editions):
+            return None
+        candidate = {key: match.get(key) for key in ("tmdbId", "imdbId", "tvdbId", "title", "year", "overview", "genres", "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "director", "actors", "collection", "collectionTitle", "size_gb", "releaseTitle", "sourceTitle", "certification", "contentRating") if key in match}
+        candidate["edition"] = edition
+        candidate["reason"] = reason
+        scores = self._score_components(candidate, profile)
+        score = scores["overall_score"]
+        key_material = f"{media_type}:{stable_id}" if not edition else f"{media_type}:{stable_id}:{str(edition).strip().casefold()}"
+        candidate_key = hashlib.sha256(key_material.encode()).hexdigest()
+        quality = self.tools._extract_quality(match)
+        now = timestamp()
+        with sqlite3.connect(CONTROL_DB) as connection:
+            connection.execute(
+                """
+                INSERT INTO discovery_candidates (candidate_key, media_type, title, year, external_ids_json, genres_json, score, watch_affinity_score, collection_significance_score, rarity_preservation_score, storage_cost_score, acquisition_confidence_score, overall_score, score_reasons_json, rationale, raw_json, edition, quality, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(candidate_key) DO UPDATE SET score=excluded.score, watch_affinity_score=excluded.watch_affinity_score, collection_significance_score=excluded.collection_significance_score, rarity_preservation_score=excluded.rarity_preservation_score, storage_cost_score=excluded.storage_cost_score, acquisition_confidence_score=excluded.acquisition_confidence_score, overall_score=excluded.overall_score, score_reasons_json=excluded.score_reasons_json, rationale=excluded.rationale, edition=excluded.edition, quality=excluded.quality, updated_at=excluded.updated_at
+                """,
+                (candidate_key, media_type, candidate["title"], candidate.get("year"), json.dumps({id_key: match[id_key]}), json.dumps(candidate.get("genres", [])), score, scores["watch_affinity_score"], scores["collection_significance_score"], scores["rarity_preservation_score"], scores["storage_cost_score"], scores["acquisition_confidence_score"], scores["overall_score"], json.dumps(scores["score_reasons"], sort_keys=True), reason, json.dumps(candidate), edition, quality, now, now),
+            )
+            row_id = connection.execute("SELECT id FROM discovery_candidates WHERE candidate_key=?", (candidate_key,)).fetchone()[0]
+        existing.add(stable_id)
+        existing_titles.add(str(candidate.get("title") or "").strip().casefold())
+        return {"id": row_id, "title": candidate["title"], "media_type": media_type, "score": score}
+
+    def taste_lookup_fallback(self, profile: dict[str, Any] | None = None, limit: int = 8) -> list[dict[str, Any]]:
+        """Fill the discovery queue from Radarr lookups of watched directors and recent titles when Gemini is thin or down."""
+        profile = profile or self.taste_profile()
+        if not self.planner or not getattr(self.planner, "radarr", None):
+            return []
+        terms: list[str] = []
+        for director, _count in (profile.get("top_directors") or [])[:4]:
+            if director:
+                terms.append(str(director))
+        for item in (profile.get("recent_activity") or [])[:6]:
+            title = str(item.get("title") or "").strip()
+            if title:
+                terms.append(title)
+        for genre, _count in (profile.get("top_genres") or [])[:3]:
+            if genre:
+                terms.append(str(genre))
+        existing = self._existing_keys()
+        existing_titles = self._existing_titles()
+        existing_editions = self._existing_edition_keys()
+        inserted: list[dict[str, Any]] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            clean = term.strip()
+            if not clean or clean.casefold() in seen_terms:
+                continue
+            seen_terms.add(clean.casefold())
+            try:
+                matches = self.planner.radarr.get("api/v3/movie/lookup", {"term": clean})
+            except Exception:
+                continue
+            valid = [item for item in matches if isinstance(item, dict) and item.get("tmdbId")]
+            for match in valid[:8]:
+                row = self._ingest_match(match, "movie", profile, f"Watch-taste fallback from '{clean}'", existing, existing_titles, existing_editions)
+                if not row:
+                    continue
+                inserted.append(row)
+                if len(inserted) >= limit:
+                    return inserted
+        return inserted
 
     def queue(self, limit: int = 50) -> list[dict[str, Any]]:
         existing = self._existing_keys()

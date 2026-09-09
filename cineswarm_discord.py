@@ -361,7 +361,7 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback last|ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `franchise`, `watch [MINS] [GENRE]`, `add Movie Title (Year)`, `plan TITLE`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback last|ID good|bad NOTE`, `digest`, `scan_plex`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
         if lowered in ("monitor", "ops", "live_monitor"):

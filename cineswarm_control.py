@@ -1550,11 +1550,24 @@ class ControlPlane:
             result = self.discovery.run()
         except Exception as exc:
             rescored = 0
+            fallback: list[dict[str, Any]] = []
             try:
                 rescored = int(self.discovery.rescore_open_candidates() or 0)
             except Exception:
                 pass
-            result = {"status": "model_unavailable", "generated": 0, "inserted": 0, "rescored_candidates": rescored, "error": str(exc)[:300]}
+            try:
+                fallback = self.discovery.taste_lookup_fallback(limit=8)
+            except Exception:
+                fallback = []
+            result = {
+                "status": "model_unavailable",
+                "generated": 0,
+                "inserted": len(fallback),
+                "candidates": fallback,
+                "fallback_inserted": len(fallback),
+                "rescored_candidates": rescored,
+                "error": str(exc).split(":", 1)[0][:160],
+            }
             self.store.audit(actor, "discovery_run", "collection", "read-only", "model_unavailable", result)
             return result
         self.store.audit(actor, "discovery_run", "collection", "read-only", "complete", {"generated": result.get("generated"), "inserted": result.get("inserted")})

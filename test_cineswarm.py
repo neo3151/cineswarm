@@ -466,6 +466,21 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(DiscoveryEngine._select_match(matches, "Green Room", 1978))
         self.assertIsNone(DiscoveryEngine._select_match(matches, "Green Room", 2020))
 
+    def test_taste_lookup_fallback_inserts_unowned_director_film(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = f"{directory}/catalog.db"
+            control = f"{directory}/control.db"
+            with sqlite3.connect(catalog) as connection:
+                connection.execute("CREATE TABLE catalog_items (source_id TEXT, title TEXT, present INTEGER, raw_json TEXT)")
+            tools = SimpleNamespace(_extract_edition=lambda item: None, _extract_quality=lambda item: None)
+            planner = SimpleNamespace(radarr=SimpleNamespace(get=lambda path, params=None: [{"title": "The Big Lebowski", "year": 1998, "tmdbId": 115, "genres": ["Comedy"], "runtime": 117}]))
+            store = SimpleNamespace(snapshot_payload=lambda service: None)
+            with patch("cineswarm_discovery.CONTROL_DB", control), patch("cineswarm_discovery.CATALOG_DB", catalog):
+                engine = DiscoveryEngine(store, planner, tools)
+                inserted = engine.taste_lookup_fallback({"top_directors": [("Joel Coen", 4)], "recent_activity": [], "top_genres": []}, limit=3)
+        self.assertEqual(inserted[0]["title"], "The Big Lebowski")
+        self.assertGreater(inserted[0]["score"], 0)
+
     def test_queue_filters_candidates_already_in_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = f"{directory}/catalog.db"
