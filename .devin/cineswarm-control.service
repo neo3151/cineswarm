@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/workspace/cineswarm
 EnvironmentFile=-%h/workspace/cineswarm/.env
+Environment=CINESWARM_CONTROL_HOST=0.0.0.0
 ExecStart=/usr/bin/python3 %h/workspace/cineswarm/cineswarm_control.py
 Restart=always
 RestartSec=10

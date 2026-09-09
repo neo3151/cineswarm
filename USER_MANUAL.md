@@ -23,8 +23,8 @@ At the time of publication, CineSwarm tracks **10,575 movies** and **45 series**
 ### Primary entry points
 
 - **Discord:** mention `@Cineswarm` or begin a message with `!cine`
-- **Dashboard:** `http://192.168.1.23:8787`
-- **Health check:** `http://192.168.1.23:8787/api/health`
+- **Dashboard:** `http://localhost:8787` or `http://192.168.1.23:8787`
+- **Health check:** `http://localhost:8787/api/health` or `http://192.168.1.23:8787/api/health`
 
 ---
 
@@ -512,12 +512,13 @@ Switch whose taste and rating ceiling discovery uses:
 Open:
 
 ```text
+http://localhost:8787
 http://192.168.1.23:8787
 ```
 
 The dashboard uses HTTP Basic Auth when `CINESWARM_DASHBOARD_USERNAME` and `CINESWARM_DASHBOARD_PASSWORD` are set. `/api/health`, `/api/monitoring/snapshot`, `/api/webhooks/plex`, and `/api/webhooks/sabnzbd` stay reachable without credentials so Uptime Kuma and Plex/SABnzbd callbacks keep working.
 
-Register the Plex playback webhook as the LAN dashboard URL (`http://192.168.1.23:8787/api/webhooks/plex`). Control is bound to that address, so `127.0.0.1` will miss. On startup CineSwarm registers the URL on the Plex account webhook API (`plex.tv`); local `:/webhooks` is often missing. Plex Pass is required for playback webhooks.
+Register the Plex playback webhook as the LAN dashboard URL (`http://192.168.1.23:8787/api/webhooks/plex`). Control binds `0.0.0.0:8787`, so localhost and the LAN IP both reach the same process. On startup CineSwarm registers the URL on the Plex account webhook API (`plex.tv`); local `:/webhooks` is often missing. Plex Pass is required for playback webhooks.
 
 ### Main controls
 

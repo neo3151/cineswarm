@@ -4740,7 +4740,7 @@ def run_proactive_swarm_loop(plane: ControlPlane, interval_seconds: int = 300) -
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the read-only CineSwarm control plane.")
-    parser.add_argument("--host", default=os.environ.get("CINESWARM_CONTROL_HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=os.environ.get("CINESWARM_CONTROL_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("CINESWARM_CONTROL_PORT", "8787")))
     parser.add_argument("--refresh", action="store_true", help="Refresh service snapshots and exit.")
     args = parser.parse_args()

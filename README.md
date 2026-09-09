@@ -31,7 +31,7 @@ The SQLite catalog is the complete collection; the markdown file intentionally c
 python3 cineswarm_control.py
 ```
 
-The dashboard is bound to the LAN address `192.168.1.23:8787` by the installed user service. Open `http://192.168.1.23:8787` from another device on the same LAN. Set `CINESWARM_DASHBOARD_USERNAME` and `CINESWARM_DASHBOARD_PASSWORD` in the untracked `.env`; health, monitoring snapshot, and Plex/SABnzbd webhooks stay unauthenticated. To refresh once and exit:
+The dashboard listens on `0.0.0.0:8787`, so `http://localhost:8787`, `http://127.0.0.1:8787`, and `http://192.168.1.23:8787` all work. Keep the Plex webhook on the LAN URL. Set `CINESWARM_DASHBOARD_USERNAME` and `CINESWARM_DASHBOARD_PASSWORD` in the untracked `.env` to enable Basic Auth; health, monitoring snapshot, and Plex/SABnzbd webhooks stay unauthenticated. To refresh once and exit:
 
 ```bash
 python3 cineswarm_control.py --refresh
