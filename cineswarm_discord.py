@@ -319,9 +319,13 @@ class DiscordService:
             return "Usage: `!cine feedback DECISION_ID good|bad optional note`"
         decision_id, sentiment = parts[0], parts[1].casefold()
         note = parts[2] if len(parts) > 2 else ""
-        if not self.plane.store.add_decision_feedback(decision_id, actor, sentiment, note):
+        if hasattr(self.plane, "record_decision_feedback"):
+            saved = self.plane.record_decision_feedback(decision_id, sentiment, note, actor=actor)
+        else:
+            saved = self.plane.store.add_decision_feedback(decision_id, actor, sentiment, note)
+        if not saved:
             return "Feedback was not saved. Check the decision ID and use `good` or `bad`."
-        return f"Feedback saved for decision `{decision_id}`. Future discovery context can reference this {sentiment} outcome."
+        return f"Feedback saved for decision `{decision_id}`. Open discovery candidates were re-scored for this {sentiment} outcome."
 
     def handle(self, content: str, user_id: int) -> str:
         actor = f"discord:{user_id}"

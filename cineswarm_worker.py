@@ -272,6 +272,22 @@ class Worker:
         self._send_notification("autopilot_decision", result, f"autopilot_decision:{decision_id}", force=True)
         return result
 
+    def _near_miss_promote_recent(self, within_seconds: int = 3600) -> bool:
+        """True if an audited near-miss promote already ran in the last hour."""
+        try:
+            with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as connection:
+                row = connection.execute(
+                    "SELECT created_at FROM decision_log WHERE category='autonomous_acquisition' AND decision='executed_near_miss_promote' ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+            if not row or not row[0]:
+                return False
+            previous = datetime.fromisoformat(str(row[0]))
+            if previous.tzinfo is None:
+                previous = previous.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - previous).total_seconds() < within_seconds
+        except Exception:
+            return False
+
     def _auto_refresh_allowed(self) -> bool:
         return self._policy_bool("CINESWARM_AUTO_PLEX_REFRESH")
 
@@ -506,11 +522,11 @@ class Worker:
                 print(f"Failed to auto-update Gem knowledge: {exc}", flush=True)
             return {"status": "catalog_synced"}
         if job_type == "discovery_refresh":
-            if os.environ.get("CINESWARM_DISCOVERY_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+            if not self._policy_bool("CINESWARM_DISCOVERY_ENABLED", "true"):
                 return {"status": "disabled"}
             return self.plane.discovery_run("worker")
         if job_type == "franchise_refresh":
-            if os.environ.get("CINESWARM_DISCOVERY_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+            if not self._policy_bool("CINESWARM_DISCOVERY_ENABLED", "true"):
                 return {"status": "disabled"}
             if not self.plane.discovery:
                 return {"status": "discovery_not_configured"}
@@ -550,7 +566,9 @@ class Worker:
             if not self.plane.discovery:
                 return self._record_autopilot_decision("blocked_discovery_unavailable", {})
             queue = self.plane.discovery_queue()
-            min_score = self._policy_int("CINESWARM_AUTO_MIN_SCORE", 90)
+            min_score = self._policy_int("CINESWARM_AUTO_MIN_SCORE", 70)
+            near_miss_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_FLOOR", max(0, min_score - 2))
+            affinity_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_AFFINITY_FLOOR", 35)
             allowed_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_ALLOWED_GENRES").split(",") if genre.strip()}
             forbidden_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_FORBIDDEN_GENRES").split(",") if genre.strip()}
             required_profile = self._policy("CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE", "HD-1080p")
@@ -562,32 +580,13 @@ class Worker:
             managed_movies = self.plane.planner.radarr.get("api/v3/movie")
             skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0}
             near_misses: list[dict[str, Any]] = []
-            for candidate in queue:
-                if candidate["media_type"] != "movie" or candidate["status"] not in ("new", "approved"):
-                    skip_counts["non_movie_or_status"] += 1
-                    continue
-                if candidate["score"] < min_score:
-                    skip_counts["low_score"] += 1
-                    if len(near_misses) < 8:
-                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "low_score"})
-                    continue
-                candidate_detail = self.plane.discovery.candidate(candidate["id"])
-                if not candidate_detail:
-                    skip_counts["owned_or_missing_detail"] += 1
-                    if len(near_misses) < 8:
-                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "owned_or_missing_detail"})
-                    continue
-                genres = {genre.lower() for genre in candidate_detail.get("candidate", {}).get("genres", [])}
-                if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
-                    skip_counts["forbidden_genre"] += 1
-                    if len(near_misses) < 8:
-                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "forbidden_genre", "genres": sorted(genres & forbidden_genres) if forbidden_genres else sorted(genres)})
-                    continue
+
+            def _execute_candidate(candidate: dict[str, Any], candidate_detail: dict[str, Any], decision_name: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
                 plan = self.plane.planner.plan("movie", candidate["title"])
                 profile = next((item for item in plan.get("quality_profiles", []) if item.get("name") == required_profile), None)
                 if not plan.get("root_folders") or not profile:
                     skip_counts["missing_profile_or_root"] += 1
-                    continue
+                    return {}
                 add_payload = {
                     "media_type": "movie",
                     "candidate": candidate_detail["candidate"],
@@ -619,13 +618,100 @@ class Worker:
                     raise
                 self.control_store.complete_autonomous_action(action_id)
                 self.plane.discovery.set_status(candidate["id"], "approved")
-                return self._record_autopilot_decision("executed_recovery_search" if existing_movie else "executed_add_search", {"candidate_id": candidate["id"], "title": candidate["title"], "add_task_id": add_task_id, "search_task_id": search_task_id, "service_id": service_id, "command_id": search_result.get("result", {}).get("id")})
+                payload = {
+                    "candidate_id": candidate["id"],
+                    "title": candidate["title"],
+                    "add_task_id": add_task_id,
+                    "search_task_id": search_task_id,
+                    "service_id": service_id,
+                    "command_id": search_result.get("result", {}).get("id"),
+                    "score": candidate.get("score"),
+                }
+                if existing_movie and decision_name == "executed_add_search":
+                    decision_name = "executed_recovery_search"
+                if extra:
+                    payload.update(extra)
+                return self._record_autopilot_decision(decision_name, payload)
+
+            for candidate in queue:
+                if candidate["media_type"] != "movie" or candidate["status"] not in ("new", "approved"):
+                    skip_counts["non_movie_or_status"] += 1
+                    continue
+                if candidate["score"] < min_score:
+                    skip_counts["low_score"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({
+                            "id": candidate.get("id"),
+                            "title": candidate.get("title"),
+                            "year": candidate.get("year"),
+                            "score": candidate.get("score"),
+                            "watch_affinity_score": candidate.get("watch_affinity_score"),
+                            "reason": "low_score",
+                        })
+                    continue
+                candidate_detail = self.plane.discovery.candidate(candidate["id"])
+                if not candidate_detail:
+                    skip_counts["owned_or_missing_detail"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "owned_or_missing_detail"})
+                    continue
+                genres = {genre.lower() for genre in candidate_detail.get("candidate", {}).get("genres", [])}
+                if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
+                    skip_counts["forbidden_genre"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "forbidden_genre", "genres": sorted(genres & forbidden_genres) if forbidden_genres else sorted(genres)})
+                    continue
+                result = _execute_candidate(candidate, candidate_detail, "executed_add_search")
+                if result:
+                    return result
             near_misses.sort(key=lambda item: -float(item.get("score") or 0))
+
+            # Bounded near-miss promote: at most one/hour, score >= floor, theatrical + affinity gates.
+            if near_misses and not self._near_miss_promote_recent():
+                for miss in near_misses:
+                    score = float(miss.get("score") or 0)
+                    if score < near_miss_floor:
+                        continue
+                    candidate = next((item for item in queue if item.get("id") == miss.get("id")), None)
+                    if not candidate:
+                        continue
+                    candidate_detail = self.plane.discovery.candidate(candidate["id"])
+                    if not candidate_detail:
+                        continue
+                    raw = candidate_detail.get("candidate") or {}
+                    genres = {str(genre).lower() for genre in (raw.get("genres") or [])}
+                    if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
+                        continue
+                    runtime = raw.get("runtime") or raw.get("runtime_minutes") or 0
+                    try:
+                        runtime_val = float(runtime)
+                    except (TypeError, ValueError):
+                        runtime_val = 0.0
+                    theatrical_ok = runtime_val >= 70 and not (raw.get("seriesType") or raw.get("seasons"))
+                    affinity = float(candidate.get("watch_affinity_score") or candidate_detail.get("watch_affinity_score") or 0)
+                    if not theatrical_ok or affinity < affinity_floor:
+                        continue
+                    result = _execute_candidate(
+                        candidate,
+                        candidate_detail,
+                        "executed_near_miss_promote",
+                        {
+                            "near_miss_floor": near_miss_floor,
+                            "affinity_floor": affinity_floor,
+                            "watch_affinity_score": affinity,
+                            "runtime": runtime_val,
+                            "promote_reason": "score_within_near_miss_band_with_theatrical_affinity_gates",
+                        },
+                    )
+                    if result:
+                        return result
+
             return self._record_autopilot_decision("skipped_no_eligible_candidate", {
                 "desired_recent": desired_recent,
                 "recent_cutoff": recent_cutoff,
                 "candidate_count": len(queue),
                 "min_score": min_score,
+                "near_miss_floor": near_miss_floor,
                 "skip_counts": skip_counts,
                 "near_misses": near_misses[:5],
             })

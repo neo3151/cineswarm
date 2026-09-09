@@ -1,12 +1,12 @@
 {
   "system": "CineSwarm Omni-Catalog Copilot",
   "catalog_summary": {
-    "total_movies": 10695,
+    "total_movies": 10697,
     "total_series": 73,
-    "total_items": 10768
+    "total_items": 10770
   },
   "top_genres": {
-    "Drama": 4034,
+    "Drama": 4035,
     "Comedy": 3263,
     "Action": 2881,
     "Thriller": 2820,
@@ -17,15 +17,15 @@
     "Science Fiction": 1535,
     "Family": 1480,
     "Fantasy": 1400,
-    "Romance": 1381,
+    "Romance": 1382,
     "Mystery": 1081,
     "TV Movie": 472,
     "History": 451
   },
   "video_codecs": {
-    "h264": 7414,
+    "h264": 7416,
     "mpeg4": 63,
-    "hevc": 2517,
+    "hevc": 2516,
     "vc1": 30,
     "av1": 177,
     "mpeg2video": 32,
@@ -33,6 +33,8 @@
     "vp9": 1
   },
   "recent_vault_additions_sample": [
+    "The Crystal Calls - Making The Dark Crystal: Age of Resistance (2019) [movie]",
+    "All We Imagine as Light (2024) [movie]",
     "Muppets from Space (1999) [movie]",
     "Monsters (2010) [movie]",
     "Hit Man (2024) [movie]",
@@ -80,8 +82,266 @@
     "Steel (1997) [movie]",
     "Snow White (2001) [movie]",
     "Thelma (2024) [movie]",
-    "9 (2009) [movie]",
-    "The Dark (2018) [movie]",
-    "LEGO DC Comics Super Heroes: Justice League - Attack of the Legion of Doom! (2015) [movie]"
-  ]
+    "9 (2009) [movie]"
+  ],
+  "swarm_memory": {
+    "recent_decisions": [
+      {
+        "decision_id": "d3809d2b-b993-4e0f-9336-344a16ccf5c9",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T19:06:21+00:00"
+      },
+      {
+        "decision_id": "c3341bd5-6175-4816-97e6-53790ea049e3",
+        "category": "startup_readiness",
+        "subject": "autonomous writes",
+        "decision": "resumed",
+        "created_at": "2026-09-09T19:06:16+00:00"
+      },
+      {
+        "decision_id": "4f74add0-2daa-4dee-a7a6-919938aaf3d0",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T19:05:50+00:00"
+      },
+      {
+        "decision_id": "b7674a4c-b0a7-4869-a718-e2142185e05f",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T18:56:11+00:00"
+      },
+      {
+        "decision_id": "2700ed81-c56d-4591-b064-cf5cd0d69e2c",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T18:06:11+00:00"
+      },
+      {
+        "decision_id": "c33705c6-0503-43a8-a9e8-e64ef209596b",
+        "category": "startup_readiness",
+        "subject": "autonomous writes",
+        "decision": "resumed",
+        "created_at": "2026-09-09T18:06:06+00:00"
+      },
+      {
+        "decision_id": "5135fe3c-b861-4a8a-aa83-e239dd57b132",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T18:05:40+00:00"
+      },
+      {
+        "decision_id": "b9a59561-1878-4705-906a-833efa5ba417",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T17:56:07+00:00"
+      },
+      {
+        "decision_id": "7831afd1-3d3c-45eb-8f03-3fc97f70fd43",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T17:06:38+00:00"
+      },
+      {
+        "decision_id": "fc0cb0a3-2731-4ce3-be2b-0e9bf9a84b15",
+        "category": "startup_readiness",
+        "subject": "autonomous writes",
+        "decision": "resumed",
+        "created_at": "2026-09-09T17:06:23+00:00"
+      },
+      {
+        "decision_id": "ce19ebd8-05d5-4183-9129-5a81e5b6c7f6",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T17:04:26+00:00"
+      },
+      {
+        "decision_id": "6b09f932-37d6-4e88-bbdc-072fc1fdeffa",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T16:56:05+00:00"
+      },
+      {
+        "decision_id": "3eb842cf-0f8b-46f8-abc8-08144cd75fbb",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T16:11:17+00:00"
+      },
+      {
+        "decision_id": "91325caf-6bce-4305-a8ce-2db36518a968",
+        "category": "startup_readiness",
+        "subject": "autonomous writes",
+        "decision": "resumed",
+        "created_at": "2026-09-09T16:11:04+00:00"
+      },
+      {
+        "decision_id": "8204fc10-265c-4888-9e88-74983d92cb63",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T16:10:16+00:00"
+      },
+      {
+        "decision_id": "1bf6f31b-7fc2-4dc4-90b4-465c64f7db03",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T15:56:02+00:00"
+      },
+      {
+        "decision_id": "c549b7c8-30c4-4246-8e66-3142c47c384a",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T15:10:32+00:00"
+      },
+      {
+        "decision_id": "2050aa91-b151-402c-a93e-04863931fc50",
+        "category": "startup_readiness",
+        "subject": "autonomous writes",
+        "decision": "resumed",
+        "created_at": "2026-09-09T15:09:47+00:00"
+      },
+      {
+        "decision_id": "9bfb510a-b1ec-4887-90fd-1b03585633a6",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T15:07:50+00:00"
+      },
+      {
+        "decision_id": "e9225b19-f23b-45ba-9aca-e90527e480a8",
+        "category": "autonomous_acquisition",
+        "subject": "autonomous acquisition cycle",
+        "decision": "skipped_no_eligible_candidate",
+        "created_at": "2026-09-09T14:57:49+00:00"
+      }
+    ],
+    "feedback_polarity": {
+      "good": 0,
+      "bad": 0
+    },
+    "learned_taste_top": {
+      "sci-fi": 1.3,
+      "action": 1.3
+    },
+    "playback_top_genres": [
+      [
+        "Comedy",
+        198.0
+      ],
+      [
+        "Animation",
+        156.5
+      ],
+      [
+        "Music",
+        9.0
+      ],
+      [
+        "Crime",
+        8.0
+      ],
+      [
+        "Drama",
+        7.0
+      ],
+      [
+        "Action",
+        6.5
+      ],
+      [
+        "Horror",
+        6.0
+      ],
+      [
+        "Adventure",
+        5.5
+      ],
+      [
+        "Family",
+        5.0
+      ],
+      [
+        "Science Fiction",
+        5.0
+      ],
+      [
+        "Thriller",
+        4.5
+      ],
+      [
+        "Mystery",
+        3.0
+      ]
+    ],
+    "playback_top_directors": [
+      [
+        "Joel Coen",
+        4.0
+      ],
+      [
+        "Ethan Coen",
+        4.0
+      ],
+      [
+        "Mike Judge",
+        4.0
+      ],
+      [
+        "Edgar Wright",
+        4.0
+      ],
+      [
+        "Michael Winner",
+        2.0
+      ],
+      [
+        "Mark Dindal",
+        2.0
+      ],
+      [
+        "Sidney Lumet",
+        2.0
+      ],
+      [
+        "David Frankel",
+        2.0
+      ],
+      [
+        "Chris Columbus",
+        2
+      ],
+      [
+        "Adam McKay",
+        2
+      ]
+    ],
+    "active_policies": {
+      "CINESWARM_AUTO_ADD_SEARCH": "true",
+      "CINESWARM_AUTO_BUDGET_MODE": "queue_only",
+      "CINESWARM_AUTO_EMERGENCY_STOP": "false",
+      "CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS": "2",
+      "CINESWARM_AUTO_MIN_FREE_SPACE_GB": "500",
+      "CINESWARM_AUTO_MIN_SCORE": "70",
+      "CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE": "HD-1080p",
+      "CINESWARM_DISCOVERY_ENABLED": "true",
+      "CINESWARM_FULL_AUTOPILOT": "true"
+    }
+  },
+  "growth_gates": {
+    "min_discovery_score": "70",
+    "budget_mode": "queue_only",
+    "max_concurrent_downloads": "2"
+  }
 }

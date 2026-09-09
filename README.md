@@ -87,7 +87,7 @@ The discovery engine runs a daily Gemini-powered candidate pass, validates each 
 
 ## Autonomous Movie Policy
 
-When `CINESWARM_FULL_AUTOPILOT=true`, paired-user adds, discovery acquisitions, searches, and exact grabs execute without confirmation after live revalidation. Background discovery remains gated by score 90, `HD-1080p`, allowed genres, duplicate checks, 500 GB free, and fewer than two Radarr queue records. Growth uses `queue_only` budget mode with no weekly cap; historical counts and estimated 20 GB-per-movie usage remain recorded for reference. Emergency stop always takes precedence.
+When `CINESWARM_FULL_AUTOPILOT=true`, paired-user adds, discovery acquisitions, searches, and exact grabs execute without confirmation after live revalidation. Background discovery remains gated by score **70**, `HD-1080p`, allowed genres, duplicate checks, 500 GB free, and fewer than two concurrent downloads. Near-miss titles scoring ≥68 may promote once per hour when theatrical runtime and watch-affinity gates pass. Growth uses `queue_only` budget mode with no weekly cap; historical counts and estimated 20 GB-per-movie usage remain recorded for reference. Emergency stop always takes precedence.
 
 Automatic actions remain visible in `tasks`, `autonomous_actions`, `weekly_budget_tracker`, and `audit_events`. Adds and searches are separate revalidated operations. A successful add increments the weekly movie budget immediately; failed actions are recorded and do not loop silently.
 

@@ -85,7 +85,7 @@ Action commands execute immediately. Ask one short clarification if title, year,
 
 ## FULL-AUTOPILOT POLICY
 
-Current mode: no weekly blocker; queue-based throughput; pause at 2 Radarr queue records; require 500 GB free; background movie discovery score 90+; default new-movie profile `HD-1080p`; multi-language/dubbed acceptable; exact paired-user grabs may override warnings; emergency stop always wins.
+Current mode: no weekly blocker; queue-based throughput; pause at 2 concurrent downloads; require 500 GB free; background movie discovery score 70+ (near-miss promote ≥68 once/hour with theatrical + affinity gates); default new-movie profile `HD-1080p`; multi-language/dubbed acceptable; exact paired-user grabs may override warnings; emergency stop always wins.
 
 Never suggest bypassing emergency stop, duplicate checks, queue concurrency, storage floor, authentication, identity/release validation, or decision logging.
 

@@ -60,7 +60,7 @@ It can:
 - Add and search movies immediately for the paired Discord user while preserving separate audited task boundaries.
 - Inspect exact release names, including progress and Radarr warnings.
 - Grab an exact release immediately after live revalidation, with warning overrides recorded in the decision ledger.
-- Discover and automatically acquire strongly matching movies under a strict weekly policy.
+- Discover and automatically acquire strongly matching movies under queue-based growth gates (score 70+, concurrent ≤2).
 - Monitor imports and refresh Plex after files arrive.
 - Send Discord alerts for important operational events.
 - Recover from process crashes and stalled workers through systemd watchdogs.
@@ -404,10 +404,11 @@ Autonomous movie add-and-search is currently enabled.
 | Automatic add, search, acquire, and exact grab | Enabled |
 | Growth budget mode | Queue-based only; no weekly cap |
 | Estimated storage recorded per automatic movie | 20 GB for reference |
-| Minimum discovery score | 90 |
+| Minimum discovery score | 70 |
+| Near-miss promote floor | 68 (≤1/hour; theatrical + affinity gates) |
 | Required quality profile | `HD-1080p` |
 | Minimum free storage | 500 GB |
-| Maximum Radarr queue records | 2 |
+| Maximum concurrent downloads | 2 |
 | Recent-release window | Last 2 years |
 | Recent weekly target | First 3 slots |
 | Older catalog-gap target | Final 2 slots |

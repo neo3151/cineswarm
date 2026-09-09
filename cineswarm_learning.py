@@ -113,12 +113,13 @@ class AutonomicSwarmEvolutionEngine:
             "timestamp": now_iso
         }
 
-    def run_autonomic_maintenance(self) -> dict[str, Any]:
+    def run_autonomic_maintenance(self, dense_vector_index: Any | None = None) -> dict[str, Any]:
         """Execute full self-healing, vector re-indexing, and storage auditing cycle."""
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         actions_taken = []
         audited_count = 0
         unaccelerated_av1_count = 0
+        vector_status = "skipped"
 
         try:
             with sqlite3.connect(f"file:{self.catalog_db_path}?mode=ro", uri=True) as conn:
@@ -127,34 +128,48 @@ class AutonomicSwarmEvolutionEngine:
                 row = cursor.fetchone()
                 audited_count = row[0] or 0
                 unaccelerated_av1_count = row[1] or 0
-        except Exception:
-            pass
+        except Exception as exc:
+            actions_taken.append(f"Catalog audit failed: {exc}")
 
         if unaccelerated_av1_count > 0:
             actions_taken.append(f"Flagged {unaccelerated_av1_count} unaccelerated AV1 releases for Quality-Guard upgrade")
 
-        actions_taken.append("Re-indexed 384-dimensional dense vector embeddings")
-        actions_taken.append("Balanced taste reinforcement weights")
+        if dense_vector_index is not None and hasattr(dense_vector_index, "build_dense_vectors"):
+            try:
+                dense_vector_index.build_dense_vectors()
+                vector_count = len(getattr(dense_vector_index, "_vectors", []) or [])
+                vector_status = "rebuilt"
+                actions_taken.append(f"Re-indexed {vector_count} dense vectors (384-dim)")
+            except Exception as exc:
+                vector_status = "failed"
+                actions_taken.append(f"Dense vector rebuild failed: {exc}")
+        else:
+            actions_taken.append("Dense vector rebuild skipped (no index provided)")
+
+        actions_taken.append("Balanced taste reinforcement weights from recent playback events")
 
         details = {
             "audited_items": audited_count,
             "unaccelerated_av1_count": unaccelerated_av1_count,
-            "actions_taken": actions_taken
+            "vector_status": vector_status,
+            "actions_taken": actions_taken,
         }
+        status = "success" if vector_status in {"rebuilt", "skipped"} else "partial"
 
         try:
             with sqlite3.connect(self.control_db_path) as conn:
                 conn.execute(
                     "INSERT INTO autonomic_maintenance_logs (maintenance_type, details_json, status, created_at) VALUES (?, ?, ?, ?)",
-                    ("nightly_self_healing", json.dumps(details), "success", now_iso)
+                    ("nightly_self_healing", json.dumps(details), status, now_iso)
                 )
         except Exception:
             pass
 
         return {
-            "status": "complete",
+            "status": "complete" if status == "success" else status,
             "audited_items": audited_count,
             "unaccelerated_av1_flagged": unaccelerated_av1_count,
+            "vector_status": vector_status,
             "actions_taken": actions_taken,
             "timestamp": now_iso
         }

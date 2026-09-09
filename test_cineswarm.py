@@ -462,6 +462,20 @@ class DiscoveryTests(unittest.TestCase):
         self.assertGreater(good_score["overall_score"], bad_score["overall_score"])
         self.assertEqual(good_score, engine._score_components(candidate, good))
 
+    def test_learned_taste_and_genre_feedback_transfer_affect_affinity(self):
+        engine = DiscoveryEngine.__new__(DiscoveryEngine)
+        candidate = {"title": "Neon Drift", "year": 2018, "tmdbId": 9, "genres": ["Science Fiction"], "runtime": 110}
+        base = {"top_genres": [("Science Fiction", 2)], "top_decades": [("2010s", 1)], "decision_feedback": [], "learned_taste_profile": {}}
+        boosted = {
+            **base,
+            "learned_taste_profile": {"science fiction": 3.0},
+            "decision_feedback": [{"subject": "Other Film", "note": "more science fiction please", "sentiment": "good", "reasons": {"genres": ["Science Fiction"]}}],
+        }
+        base_score = engine._score_components(candidate, base)
+        boosted_score = engine._score_components(candidate, boosted)
+        self.assertGreater(boosted_score["watch_affinity_score"], base_score["watch_affinity_score"])
+        self.assertGreater(boosted_score["overall_score"], base_score["overall_score"])
+
 
 class ControlPlaneTests(unittest.TestCase):
     def test_emergency_stop_blocks_automatic_write_execution(self):

@@ -1956,7 +1956,13 @@ class ControlPlane:
                 "INSERT OR REPLACE INTO decision_feedback (decision_id, actor, sentiment, note, created_at) VALUES (?, ?, ?, ?, ?)",
                 (decision_id, actor, sentiment, note, now_iso)
             )
-        self.store.audit(actor, "decision_feedback", decision_id, "reinforcement", sentiment, {"note": note})
+        rescored = 0
+        if self.discovery:
+            try:
+                rescored = int(self.discovery.rescore_open_candidates() or 0)
+            except Exception as exc:
+                self.store.audit(actor, "decision_feedback_rescore", decision_id, "reinforcement", "failed", {"error": str(exc)})
+        self.store.audit(actor, "decision_feedback", decision_id, "reinforcement", sentiment, {"note": note, "rescored_candidates": rescored})
         return True
 
     def get_recent_decisions(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -4465,7 +4471,7 @@ def run_proactive_swarm_loop(plane: ControlPlane, interval_seconds: int = 300) -
                 plane.taste_memory.record_preference("user_profile_summary", profile)
                 
             # 3. Autonomic Self-Healing & Vector Re-Indexing
-            plane.evolution_engine.run_autonomic_maintenance()
+            maintenance = plane.evolution_engine.run_autonomic_maintenance(getattr(plane, "dense_vector_index", None))
 
             # 4. Proactive corrupt media scanning & auto-healing
             plane.scan_media_health(limit=20, actor="proactive-swarm", allow_automatic=True)
@@ -4477,10 +4483,20 @@ def run_proactive_swarm_loop(plane: ControlPlane, interval_seconds: int = 300) -
                 subject="vault_health_and_taste_sync",
                 decision="allowed",
                 reasons={"loop_interval": interval_seconds, "autopilot": True},
-                outcome={"status": "health_and_taste_updated"}
+                outcome={"status": "health_and_taste_updated", "maintenance": maintenance},
             )
         except Exception as exc:
-            pass
+            try:
+                plane.store.audit(
+                    "proactive-swarm",
+                    "proactive_swarm_cycle",
+                    "vault_health_and_taste_sync",
+                    "error",
+                    "failed",
+                    {"error": str(exc)},
+                )
+            except Exception:
+                print(f"Proactive swarm cycle failed: {exc}", flush=True)
 
 
 def main() -> None:

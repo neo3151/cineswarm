@@ -8,6 +8,7 @@ import os
 import math
 import re
 import sqlite3
+import time
 
 from cineswarm_knowledge import get_full_domain_knowledge, CINEMA_EXPERT_KNOWLEDGE, MEDIA_ENGINEERING_KNOWLEDGE, ARR_USENET_ECOSYSTEM_KNOWLEDGE, DOCKER_SERVER_MAINTENANCE_KNOWLEDGE
 
@@ -106,28 +107,38 @@ class HostedModelClient:
         if not self.configured:
             raise AgentError("Hosted model is not configured; set CINESWARM_MODEL_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY in .env")
         body = json.dumps({"model": self.model, "messages": messages, "temperature": temperature}).encode("utf-8")
-        request = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body_err = exc.read().decode("utf-8", errors="ignore")
-            raise AgentError(f"Hosted model returned HTTP {exc.code}: {body_err}") from exc
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise AgentError(f"Hosted model request failed: {exc.__class__.__name__}") from exc
-        try:
-            return payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise AgentError("Hosted model returned an invalid completion") from exc
+        max_attempts = max(1, int(os.environ.get("CINESWARM_MODEL_MAX_RETRIES", "3")))
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            request = urllib.request.Request(
+                self.base_url + "/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                try:
+                    return payload["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, TypeError) as exc:
+                    raise AgentError("Hosted model returned an invalid completion") from exc
+            except urllib.error.HTTPError as exc:
+                body_err = exc.read().decode("utf-8", errors="ignore")
+                last_error = AgentError(f"Hosted model returned HTTP {exc.code}: {body_err}")
+                if exc.code not in {429, 500, 502, 503, 504} or attempt >= max_attempts:
+                    raise last_error from exc
+                time.sleep(min(30.0, 1.5 * (2 ** (attempt - 1))))
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                last_error = AgentError(f"Hosted model request failed: {exc.__class__.__name__}")
+                if attempt >= max_attempts:
+                    raise last_error from exc
+                time.sleep(min(30.0, 1.5 * (2 ** (attempt - 1))))
+        raise last_error or AgentError("Hosted model request failed")
 
     def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], temperature: float = 0.2) -> dict[str, Any]:
         if not self.configured:

@@ -106,12 +106,21 @@ class DiscoveryEngine:
 
 
     def backfill_scores(self) -> int:
-        """Backfill component scores for existing discovery candidates."""
+        """Backfill component scores for candidates missing affinity scores."""
+        return self.rescore_open_candidates(only_missing_affinity=True)
+
+    def rescore_open_candidates(self, only_missing_affinity: bool = False, statuses: tuple[str, ...] = ("new", "approved")) -> int:
+        """Recompute scores for open discovery candidates from the live taste profile."""
         profile = self.taste_profile()
         updated_count = 0
+        status_clause = ",".join("?" for _ in statuses) or "'new'"
         with sqlite3.connect(CONTROL_DB) as connection:
             connection.row_factory = sqlite3.Row
-            rows = connection.execute("SELECT id, raw_json, rationale, edition, overall_score, score FROM discovery_candidates WHERE watch_affinity_score=0 AND (overall_score>0 OR score>0)").fetchall()
+            query = f"SELECT id, raw_json, rationale, edition, overall_score, score, status FROM discovery_candidates WHERE status IN ({status_clause})"
+            params: list[Any] = list(statuses)
+            if only_missing_affinity:
+                query += " AND watch_affinity_score=0 AND (overall_score>0 OR score>0)"
+            rows = connection.execute(query, params).fetchall()
             for row in rows:
                 try:
                     candidate = json.loads(row["raw_json"] or "{}")
@@ -120,30 +129,53 @@ class DiscoveryEngine:
                 candidate["edition"] = row["edition"]
                 candidate["reason"] = row["rationale"]
                 scores = self._score_components(candidate, profile)
-                overall = row["overall_score"] or row["score"] or scores["overall_score"]
+                overall = scores["overall_score"]
+                if only_missing_affinity:
+                    overall = row["overall_score"] or row["score"] or overall
                 connection.execute(
                     """
                     UPDATE discovery_candidates
-                    SET watch_affinity_score=?, collection_significance_score=?, rarity_preservation_score=?, storage_cost_score=?, acquisition_confidence_score=?, overall_score=?, score_reasons_json=?
+                    SET score=?, watch_affinity_score=?, collection_significance_score=?, rarity_preservation_score=?, storage_cost_score=?, acquisition_confidence_score=?, overall_score=?, score_reasons_json=?, updated_at=?
                     WHERE id=?
                     """,
-                    (scores["watch_affinity_score"], scores["collection_significance_score"], scores["rarity_preservation_score"], scores["storage_cost_score"], scores["acquisition_confidence_score"], overall, json.dumps(scores["score_reasons"], sort_keys=True), row["id"])
+                    (overall, scores["watch_affinity_score"], scores["collection_significance_score"], scores["rarity_preservation_score"], scores["storage_cost_score"], scores["acquisition_confidence_score"], overall, json.dumps(scores["score_reasons"], sort_keys=True), timestamp(), row["id"]),
                 )
                 updated_count += 1
         return updated_count
-
-
 
     def _decision_feedback(self) -> list[dict[str, Any]]:
         try:
             with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as connection:
                 connection.row_factory = sqlite3.Row
-                rows = connection.execute("SELECT f.sentiment, f.note, d.category, d.subject, d.decision, f.created_at FROM decision_feedback f JOIN decision_log d ON d.decision_id=f.decision_id ORDER BY f.created_at DESC LIMIT 50").fetchall()
+                rows = connection.execute("SELECT f.sentiment, f.note, d.category, d.subject, d.decision, d.reasons_json, f.created_at FROM decision_feedback f JOIN decision_log d ON d.decision_id=f.decision_id ORDER BY f.created_at DESC LIMIT 50").fetchall()
             return [dict(row) for row in rows]
         except sqlite3.Error:
             return []
 
+    def _learned_taste_profile(self) -> dict[str, float]:
+        """Load Plex-webhook RL genre weights from user_taste_memory."""
+        try:
+            with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM user_taste_memory WHERE key='learned_taste_profile'"
+                ).fetchone()
+            if not row or not row[0]:
+                return {}
+            payload = json.loads(row[0])
+            if not isinstance(payload, dict):
+                return {}
+            learned: dict[str, float] = {}
+            for key, value in payload.items():
+                try:
+                    learned[str(key).strip().casefold()] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            return learned
+        except (sqlite3.Error, json.JSONDecodeError, TypeError):
+            return {}
+
     def taste_profile(self) -> dict[str, Any]:
+        learned = self._learned_taste_profile()
         # Try to use playback history for weighted taste profile
         if self.playback_history:
             try:
@@ -152,7 +184,7 @@ class DiscoveryEngine:
                     titles = []
                     with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
                         titles = [f"{row[0]} ({row[1] or 'n.d.'})" for row in connection.execute("SELECT title, year FROM catalog_items WHERE present=1 ORDER BY title LIMIT 150")]
-                    return {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "source": "playback_history"}
+                    return {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": learned, "source": "playback_history"}
             except Exception:
                 pass  # Fall back to catalog-based
 
@@ -171,8 +203,7 @@ class DiscoveryEngine:
         titles = []
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
             titles = [f"{row[0]} ({row[1] or 'n.d.'})" for row in connection.execute("SELECT title, year FROM catalog_items WHERE present=1 ORDER BY title LIMIT 150")]
-        return {"top_genres": genres.most_common(12), "top_decades": decades.most_common(8), "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "source": "catalog"}
-
+        return {"top_genres": genres.most_common(12), "top_decades": decades.most_common(8), "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": learned, "source": "catalog"}
     def _existing_keys(self) -> set[str]:
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
             keys = {row[0] for row in connection.execute("SELECT source_id FROM catalog_items WHERE present=1")}
@@ -282,9 +313,14 @@ class DiscoveryEngine:
 
     def _score_components(self, candidate: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
         genres = [str(value) for value in (candidate.get("genres") or [])]
+        genre_keys = {genre.casefold() for genre in genres}
         top_genres = dict(profile.get("top_genres", []))
         year = candidate.get("year")
         genre_points = min(45.0, sum(float(top_genres.get(genre, 0) or 0) for genre in genres) * 2.5)
+        learned = profile.get("learned_taste_profile") or {}
+        learned_points = 0.0
+        if isinstance(learned, dict) and genre_keys:
+            learned_points = min(12.0, sum(max(-2.0, min(4.0, float(learned.get(genre, 0) or 0) - 1.0)) * 3.0 for genre in genre_keys))
         decade_points = 0.0
         if isinstance(year, int):
             decade_points = min(15.0, float(dict(profile.get("top_decades", [])).get(f"{year // 10 * 10}s", 0) or 0) * 1.5)
@@ -299,16 +335,39 @@ class DiscoveryEngine:
         title_tokens = {token for token in re.findall(r"[a-z0-9]+", title) if len(token) > 2}
         feedback_delta = 0.0
         feedback_matches = 0
+        feedback_transfer = 0.0
         for item in feedback:
             subject = str(item.get("subject", "")).casefold()
             note = str(item.get("note", "")).casefold()
+            polarity = 8.0 if item.get("sentiment") == "good" else -8.0
             relevant = bool(title and (title in subject or title in note)) or bool(title_tokens & set(re.findall(r"[a-z0-9]+", subject)))
             if relevant:
                 feedback_matches += 1
-                feedback_delta += 8.0 if item.get("sentiment") == "good" else -8.0
-        feedback_delta = max(-20.0, min(20.0, feedback_delta))
-        watch_affinity = self._bounded(20.0 + genre_points + decade_points + director_points + actor_points + studio_points + recent_points + feedback_delta)
-
+                feedback_delta += polarity
+                continue
+            # Genre / decade transfer learning from feedback subjects (not title-only).
+            reasons = item.get("reasons") if isinstance(item.get("reasons"), dict) else {}
+            try:
+                reasons = reasons or json.loads(item.get("reasons_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                reasons = {}
+            fb_genres = {str(g).casefold() for g in (reasons.get("genres") or []) if g}
+            if not fb_genres:
+                fb_genres = {token for token in re.findall(r"[a-z0-9]+", f"{subject} {note}") if token in genre_keys}
+            if fb_genres & genre_keys:
+                feedback_transfer += 3.0 if polarity > 0 else -3.0
+            decade_match = False
+            if isinstance(year, int):
+                decade_label = f"{year // 10 * 10}s"
+                if decade_label.casefold() in subject or decade_label.casefold() in note:
+                    decade_match = True
+                year_hit = re.search(r"\b(19|20)\d{2}\b", subject)
+                if year_hit and int(year_hit.group(0)) // 10 * 10 == year // 10 * 10:
+                    decade_match = True
+            if decade_match:
+                feedback_transfer += 1.5 if polarity > 0 else -1.5
+        feedback_delta = max(-20.0, min(20.0, feedback_delta + feedback_transfer))
+        watch_affinity = self._bounded(20.0 + genre_points + learned_points + decade_points + director_points + actor_points + studio_points + recent_points + feedback_delta)
         collection_name = candidate.get("collection") or candidate.get("collectionTitle") or candidate.get("franchise_name")
         collection_significance = self._bounded(35 + (35 if collection_name else 0) + (15 if candidate.get("status") == "continuing" else 0) + (10 if candidate.get("seasons") else 0))
         rarity_text = " ".join(str(candidate.get(key, "")) for key in ("title", "overview", "edition", "reason")).casefold()
@@ -338,7 +397,7 @@ class DiscoveryEngine:
             + acquisition_confidence * 0.15
         )
         reasons = [
-            {"component": "watch_affinity", "score": watch_affinity, "detail": f"playback genre/decade/creator fit; {feedback_matches} relevant feedback record(s), adjustment {feedback_delta:+.0f}"},
+            {"component": "watch_affinity", "score": watch_affinity, "detail": f"playback genre/decade/creator fit; learned_taste {learned_points:+.1f}; {feedback_matches} title feedback match(es); feedback_delta {feedback_delta:+.0f}"},
             {"component": "collection_significance", "score": collection_significance, "detail": "franchise/collection and series completeness metadata"},
             {"component": "rarity_preservation", "score": rarity_preservation, "detail": f"preservation markers: {', '.join(rarity_matches) if rarity_matches else 'none'}"},
             {"component": "storage_cost", "score": storage_cost, "detail": f"higher is lower estimated storage cost ({estimated_cost:.1f} GB-equivalent)"},
