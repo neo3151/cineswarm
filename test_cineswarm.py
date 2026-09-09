@@ -221,6 +221,36 @@ class AcquisitionPlannerTests(unittest.TestCase):
         self.assertEqual(result["title"], "Movie.2020.2160p.REMUX")
         self.assertEqual(result["rejections"], ["warning"])
 
+    def test_quality_analysis_flags_av1_for_tablet(self):
+        planner = AcquisitionPlanner.__new__(AcquisitionPlanner)
+        planner.tools = SimpleNamespace(store=SimpleNamespace(snapshot_payload=lambda service: {
+            "_fetched_at": "now",
+            "items": [{
+                "id": 9,
+                "title": "Get Out",
+                "year": 2017,
+                "hasFile": True,
+                "qualityProfileId": 1,
+                "movieFile": {
+                    "quality": {"quality": {"id": 7, "name": "WEBDL-1080p"}},
+                    "mediaInfo": {"videoCodec": "AV1"},
+                },
+            }],
+        }))
+        planner.radarr = SimpleNamespace(get=lambda path: [{
+            "id": 1,
+            "name": "HD-1080p",
+            "cutoff": 7,
+            "upgradeAllowed": True,
+            "items": [{"quality": {"id": 7, "name": "WEBDL-1080p"}}],
+        }])
+
+        result = planner.quality_analysis("movie")
+
+        self.assertEqual(result["without_files"], 0)
+        self.assertEqual(result["av1_upgrade_count"], 1)
+        self.assertEqual(result["upgrade_candidates"][0]["upgrade_reason"], "av1_unaccelerated_tab_s9_fe")
+
     def test_quality_fallback_uses_put_json_before_search(self):
         client = FakeArrClient()
         planner = AcquisitionPlanner(client, FakeArrClient(), None)
@@ -476,8 +506,76 @@ class DiscoveryTests(unittest.TestCase):
         self.assertGreater(boosted_score["watch_affinity_score"], base_score["watch_affinity_score"])
         self.assertGreater(boosted_score["overall_score"], base_score["overall_score"])
 
+    def test_watch_relative_weights_prefer_played_genres_over_owned_majority(self):
+        engine = DiscoveryEngine.__new__(DiscoveryEngine)
+        comedy = {"title": "Funny Bone", "year": 2004, "tmdbId": 1, "genres": ["Comedy"], "runtime": 100}
+        drama = {"title": "Serious Work", "year": 2018, "tmdbId": 2, "genres": ["Drama"], "runtime": 110, "collection": "Prestige"}
+        profile = {
+            "source": "playback_history",
+            "top_genres": [("Comedy", 200.0), ("Animation", 158.5), ("Drama", 7.0)],
+            "top_decades": [("2000s", 126.0), ("2010s", 23.5)],
+            "decision_feedback": [],
+        }
+
+        comedy_score = engine._score_components(comedy, profile)
+        drama_score = engine._score_components(drama, profile)
+
+        self.assertGreater(comedy_score["watch_affinity_score"], drama_score["watch_affinity_score"])
+        self.assertGreater(comedy_score["overall_score"], drama_score["overall_score"])
+
+    def test_implicit_watch_feedback_seeds_once(self):
+        engine = DiscoveryEngine.__new__(DiscoveryEngine)
+        with tempfile.TemporaryDirectory() as tmp:
+            control = os.path.join(tmp, "control.db")
+            with sqlite3.connect(control) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE decision_log (
+                        decision_id TEXT PRIMARY KEY, actor TEXT, category TEXT, subject TEXT,
+                        decision TEXT, reasons_json TEXT, outcome_json TEXT, created_at TEXT, updated_at TEXT
+                    );
+                    CREATE TABLE decision_feedback (
+                        decision_id TEXT PRIMARY KEY, actor TEXT, sentiment TEXT, note TEXT, created_at TEXT
+                    );
+                    CREATE TABLE user_taste_memory (
+                        key TEXT PRIMARY KEY, value_json TEXT, updated_at TEXT
+                    );
+                    """
+                )
+            with patch("cineswarm_discovery.CONTROL_DB", control):
+                engine._seed_implicit_watch_feedback({"top_genres": [("Comedy", 200), ("Animation", 150)]})
+                engine._seed_implicit_watch_feedback({"top_genres": [("Drama", 9)]})
+                feedback = engine._decision_feedback()
+            self.assertEqual(len(feedback), 1)
+            self.assertEqual(feedback[0]["sentiment"], "good")
+            self.assertIn("Comedy", feedback[0]["note"])
+
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_never_imported_movies_classifies_catalog_gaps(self):
+        plane = ControlPlane.__new__(ControlPlane)
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = os.path.join(tmp, "catalog.db")
+            with sqlite3.connect(catalog) as connection:
+                connection.execute(
+                    """CREATE TABLE catalog_items (
+                        id INTEGER PRIMARY KEY, media_type TEXT, present INTEGER, size_mb REAL,
+                        title TEXT, year INTEGER, added TEXT, path TEXT, source_native_id INTEGER,
+                        genres_json TEXT, monitored INTEGER
+                    )"""
+                )
+                connection.execute(
+                    "INSERT INTO catalog_items VALUES (1,'movie',1,NULL,'Muppets from Space',1999,'2026-09-08T00:00:00','/media/Movies/Muppets',10,'[\"Comedy\",\"Family\"]',1)"
+                )
+                connection.execute(
+                    "INSERT INTO catalog_items VALUES (2,'movie',1,5000,'Owned Film',2001,'2026-09-08T00:00:00','/media/Movies/Owned',11,'[\"Drama\"]',1)"
+                )
+            with patch("cineswarm_control.CATALOG_DB", catalog):
+                result = plane.never_imported_movies(added_since_days=None, limit=10)
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["recent"][0]["title"], "Muppets from Space")
+        self.assertEqual(result["genre_counts"]["Comedy"], 1)
+
     def test_emergency_stop_blocks_automatic_write_execution(self):
         calls = []
         plane = ControlPlane.__new__(ControlPlane)
@@ -649,7 +747,7 @@ class WorkerTests(unittest.TestCase):
         )
         worker.plane = SimpleNamespace(planner=SimpleNamespace(queue=lambda media_type: {"total_records": 0}))
 
-        with patch.dict("os.environ", {"CINESWARM_AUTO_EMERGENCY_STOP": "false"}):
+        with patch.dict("os.environ", {"CINESWARM_AUTO_EMERGENCY_STOP": "false", "CINESWARM_AUTO_BUDGET_MODE": "weekly"}):
             result = worker.execute({"job_type": "autonomous_acquisition"})
 
         self.assertEqual(result["status"], "blocked_weekly_budget")
@@ -771,8 +869,9 @@ class WorkerTests(unittest.TestCase):
         worker.control_store = FakeControlStore()
         worker._send_notification = lambda *args, **kwargs: None
 
-        first = worker.execute({"job_type": "failed_download_recovery"})
-        second = worker.execute({"job_type": "failed_download_recovery"})
+        with patch.dict("os.environ", {"CINESWARM_FULL_AUTOPILOT": "false"}):
+            first = worker.execute({"job_type": "failed_download_recovery"})
+            second = worker.execute({"job_type": "failed_download_recovery"})
 
         self.assertEqual(first["approval_tasks_created"], 2)
         self.assertEqual(second["approval_tasks_created"], 0)
@@ -796,11 +895,34 @@ class WorkerTests(unittest.TestCase):
         worker.plane = SimpleNamespace(planner=planner)
         worker._send_notification = lambda *args, **kwargs: None
 
-        result = worker.execute({"job_type": "failed_download_recovery"})
+        with patch.dict("os.environ", {"CINESWARM_FULL_AUTOPILOT": "false"}):
+            result = worker.execute({"job_type": "failed_download_recovery"})
 
         self.assertEqual(result["approval_tasks_created"], 3)
         self.assertEqual([task[2]["service_id"] for task in store.tasks], [1, 2, 3])
         self.assertEqual(result["limits"], {"per_cycle": 3, "per_media": 1, "cooldown": 60})
+
+    def test_never_imported_recovery_searches_one_recent_gap(self):
+        worker = Worker.__new__(Worker)
+        store = FakeControlStore()
+        store.record_decision = lambda *args, **kwargs: "decision-gap"
+        store.update_decision = lambda *args, **kwargs: None
+        worker.control_store = store
+        worker.plane = SimpleNamespace(
+            never_imported_movies=lambda added_since_days=14, limit=20: {
+                "count": 2,
+                "recent": [
+                    {"title": "Drama Stub", "service_id": 2, "monitored": True, "added": "2026-09-01", "genres": ["Drama"]},
+                    {"title": "Muppets from Space", "service_id": 9, "monitored": True, "added": "2026-09-08", "genres": ["Comedy"]},
+                ],
+            },
+            approve_task=lambda task_id, actor: {"result": {"id": 77}},
+        )
+        result = worker._recover_never_imported()
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(len(result["recovered"]), 1)
+        self.assertEqual(result["recovered"][0]["service_id"], 9)
+        self.assertEqual(store.tasks[0][0], "radarr_search_request")
 
     def test_emergency_stop_blocks_failed_download_recovery(self):
         worker = Worker.__new__(Worker)

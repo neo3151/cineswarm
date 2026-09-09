@@ -1590,6 +1590,57 @@ class ControlPlane:
             "client_device": "Samsung Galaxy Tab S9 FE"
         }
 
+    def never_imported_movies(self, added_since_days: int | None = 14, limit: int = 25) -> dict[str, Any]:
+        """Radarr-managed movies in the catalog that still have no file size (never imported)."""
+        empty = {"count": 0, "recent": [], "genre_counts": {}, "added_since_days": added_since_days}
+        if not os.path.exists(CATALOG_DB):
+            return empty
+        cutoff = None
+        if added_since_days:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=int(added_since_days))).strftime("%Y-%m-%d")
+        genre_counts: Counter[str] = Counter()
+        recent: list[dict[str, Any]] = []
+        total = 0
+        try:
+            with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """SELECT title, year, added, path, source_native_id, genres_json, monitored
+                       FROM catalog_items
+                       WHERE media_type='movie' AND present=1 AND (size_mb IS NULL OR size_mb=0)
+                       ORDER BY added DESC"""
+                ).fetchall()
+        except sqlite3.Error:
+            return empty
+        for row in rows:
+            added = str(row["added"] or "")
+            if cutoff and added < cutoff:
+                continue
+            total += 1
+            genres = []
+            try:
+                genres = [str(item) for item in json.loads(row["genres_json"] or "[]") if item]
+            except json.JSONDecodeError:
+                genres = []
+            for genre in genres:
+                genre_counts[genre] += 1
+            if len(recent) < max(1, min(int(limit), 50)):
+                recent.append({
+                    "title": row["title"],
+                    "year": row["year"],
+                    "added": added,
+                    "path": row["path"],
+                    "service_id": row["source_native_id"],
+                    "monitored": bool(row["monitored"]),
+                    "genres": genres,
+                })
+        return {
+            "count": total,
+            "recent": recent,
+            "genre_counts": dict(genre_counts.most_common(8)),
+            "added_since_days": added_since_days,
+        }
+
 
     def vibe_search(self, user_prompt: str) -> dict[str, Any]:
         if not user_prompt:
@@ -2296,7 +2347,9 @@ class ControlPlane:
             "bloated_files_count": len(over_20gb),
             "bloated_files_sample": over_20gb[:5],
             "av1_files_count": len(av1_files),
-            "av1_files_sample": av1_files[:5],
+            "av1_files_sample": av1_files[:25],
+            "av1_total_gb": round(sum(item.get("size_gb") or 0 for item in av1_files), 1),
+            "upgrade_recommendation": "Replace AV1 with HEVC or H.264 for Tab S9 FE direct play. Advisory only — no silent rewrite.",
             "recommendations": recommendations
         }
         self.store.audit(actor, "storage_optimization_audit", "vault", "catalog-scan", "completed", {"bloated_count": len(over_20gb), "av1_count": len(av1_files)})
@@ -2417,6 +2470,13 @@ class ControlPlane:
                     payload = payload["result"]
                 movies = (payload.get("movies") or {}) if isinstance(payload, dict) else {}
                 series = (payload.get("series") or {}) if isinstance(payload, dict) else {}
+                gaps: dict[str, Any] = {"count": 0, "genre_counts": {}, "recent": []}
+                shield: dict[str, Any] = {}
+                try:
+                    gaps = self.never_imported_movies(added_since_days=None, limit=8)
+                    shield = self.probe_transcode_shield()
+                except Exception:
+                    pass
                 library_integrity = {
                     "status": row["status"],
                     "checked_at": row["created_at"],
@@ -2426,6 +2486,14 @@ class ControlPlane:
                         "without_file": movies.get("without_file"),
                         "file_not_indexed": movies.get("file_not_indexed"),
                         "path_missing": movies.get("path_missing"),
+                        "never_imported": gaps.get("count"),
+                        "never_imported_genres": gaps.get("genre_counts"),
+                        "never_imported_recent": [f"{item.get('title')} ({item.get('year')})" for item in (gaps.get("recent") or [])[:5]],
+                    },
+                    "av1": {
+                        "count": shield.get("non_compliant_count"),
+                        "client": shield.get("client_device"),
+                        "status": shield.get("status"),
                     },
                     "series": {
                         "managed": series.get("managed"),

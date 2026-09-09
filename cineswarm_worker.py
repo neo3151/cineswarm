@@ -288,6 +288,54 @@ class Worker:
         except Exception:
             return False
 
+    def _recover_never_imported(self) -> dict[str, Any]:
+        """Search at most one recent Radarr movie that was added but never imported."""
+        preferred = {"comedy", "animation", "action", "science fiction", "family"}
+        gaps = self.plane.never_imported_movies(added_since_days=14, limit=20)
+        candidates = list(gaps.get("recent") or [])
+        candidates.sort(
+            key=lambda item: (
+                bool(preferred & {str(genre).casefold() for genre in (item.get("genres") or [])}),
+                str(item.get("added") or ""),
+            ),
+            reverse=True,
+        )
+        recovered = []
+        for item in candidates:
+            service_id = item.get("service_id")
+            if not service_id or not item.get("monitored"):
+                continue
+            parent_task_id = f"never-imported:{service_id}"
+            if self.control_store.task_exists("radarr_search_request", parent_task_id):
+                continue
+            payload = {
+                "media_type": "movie",
+                "service_id": service_id,
+                "parent_task_id": parent_task_id,
+                "reason": "Recent Radarr add still has no imported file.",
+            }
+            task_id = self.control_store.create_task("radarr_search_request", "worker", payload)
+            task_result = {"task_id": task_id, "task_type": "radarr_search_request", "service_id": service_id, "title": item.get("title"), "status": "pending_approval"}
+            decision_id = self.control_store.record_decision(
+                "worker",
+                "never_imported_recovery",
+                item.get("title") or str(service_id),
+                "pending",
+                {"task_id": task_id, "service_id": service_id},
+                {},
+            )
+            try:
+                result = self.plane.approve_task(task_id, "autonomous-recovery")
+                self.control_store.update_decision(decision_id, "executed", {"task_id": task_id, "result": result.get("result") or {}})
+                task_result.update({"status": "executed", "decision_id": decision_id})
+            except Exception as exc:
+                if hasattr(self.control_store, "update_decision"):
+                    self.control_store.update_decision(decision_id, "failed", {"task_id": task_id, "error": str(exc)})
+                task_result.update({"status": "failed", "decision_id": decision_id, "error": str(exc)})
+            recovered.append(task_result)
+            break
+        return {"count": int(gaps.get("count") or 0), "recovered": recovered}
+
     def _auto_refresh_allowed(self) -> bool:
         return self._policy_bool("CINESWARM_AUTO_PLEX_REFRESH")
 
@@ -768,7 +816,16 @@ class Worker:
             notify = self.control_store.get_policy("CINESWARM_NOTIFY_ON_FAILED_DOWNLOAD") or os.environ.get("CINESWARM_NOTIFY_ON_FAILED_DOWNLOAD", "false")
             if notify.lower() in ("1", "true", "yes", "on") and failed:
                 self._send_notification("failed_downloads", {"count": len(failed), "failed": failed[:5]}, "failed_downloads")
-            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}}
+            never_imported: dict[str, Any] = {"count": 0, "recovered": []}
+            if (
+                not approval_tasks
+                and not pressure.get("pressured")
+                and hasattr(self.plane, "never_imported_movies")
+                and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
+            ):
+                never_imported = self._recover_never_imported()
+                approval_tasks.extend(never_imported.get("recovered") or [])
+            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}, "never_imported": never_imported}
         if job_type == "media_health_scan":
             scan_res = self.plane.scan_media_health(limit=50, actor="worker", allow_automatic=getattr(self, "_startup_ready", True))
             if scan_res.get("corrupt_count", 0) > 0:

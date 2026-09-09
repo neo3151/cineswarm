@@ -693,7 +693,19 @@ class AcquisitionPlanner:
             cutoff_name = next((entry.get("quality", {}).get("name") for entry in (profile.get("items", []) or []) if entry.get("quality", {}).get("id") == cutoff_id), None)
             if cutoff_id and quality.get("id") and quality.get("id") != cutoff_id and profile.get("upgradeAllowed", True) and str(profile.get("name", "")).lower() != "any":
                 upgrade_candidates.append({"service_id": item.get("id"), "title": item.get("title"), "year": item.get("year"), "current_quality": name, "cutoff_quality": cutoff_name, "quality_profile": profile.get("name")})
-        return {"media_type": media_type, "snapshot_fetched_at": snapshot.get("_fetched_at"), "managed": len(items), "with_files": len(items) - missing, "without_files": missing, "quality_distribution": quality_counts, "upgrade_candidate_count": len(upgrade_candidates), "upgrade_candidates": upgrade_candidates[:100], "note": "Upgrade candidates are advisory. Profiles named Any are not treated as upgrade policies. No searches, replacements, or deletions occur during analysis."}
+            codec = str((movie_file.get("mediaInfo") or {}).get("videoCodec") or movie_file.get("relativePath") or "").lower()
+            if "av1" in codec:
+                upgrade_candidates.append({
+                    "service_id": item.get("id"),
+                    "title": item.get("title"),
+                    "year": item.get("year"),
+                    "current_quality": name,
+                    "cutoff_quality": cutoff_name or "HD-1080p",
+                    "quality_profile": profile.get("name"),
+                    "upgrade_reason": "av1_unaccelerated_tab_s9_fe",
+                })
+        av1_upgrades = sum(1 for item in upgrade_candidates if item.get("upgrade_reason") == "av1_unaccelerated_tab_s9_fe")
+        return {"media_type": media_type, "snapshot_fetched_at": snapshot.get("_fetched_at"), "managed": len(items), "with_files": len(items) - missing, "without_files": missing, "quality_distribution": quality_counts, "upgrade_candidate_count": len(upgrade_candidates), "av1_upgrade_count": av1_upgrades, "upgrade_candidates": upgrade_candidates[:100], "note": "Upgrade candidates are advisory. AV1 is flagged because Tab S9 FE lacks hardware decode. Profiles named Any are not treated as upgrade policies. No searches, replacements, or deletions occur during analysis."}
 
     def queue(self, media_type: str, timeout: float | None = None) -> dict[str, Any]:
         if media_type not in ("movie", "series"):

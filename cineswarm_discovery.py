@@ -184,7 +184,11 @@ class DiscoveryEngine:
                     titles = []
                     with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
                         titles = [f"{row[0]} ({row[1] or 'n.d.'})" for row in connection.execute("SELECT title, year FROM catalog_items WHERE present=1 ORDER BY title LIMIT 150")]
-                    return {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": learned, "source": "playback_history"}
+                    profile = {**pb, "existing_titles_sample": titles, "decision_feedback": self._decision_feedback(), "learned_taste_profile": {**learned, **self._learned_taste_profile()}, "source": "playback_history"}
+                    self._persist_watch_first(profile)
+                    profile["learned_taste_profile"] = self._learned_taste_profile() or profile["learned_taste_profile"]
+                    profile["decision_feedback"] = self._decision_feedback()
+                    return profile
             except Exception:
                 pass  # Fall back to catalog-based
 
@@ -311,19 +315,114 @@ class DiscoveryEngine:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _relative_weights(pairs: Any) -> dict[str, float]:
+        weights: dict[str, float] = {}
+        for item in pairs or []:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            key = str(item[0] or "").strip()
+            if not key:
+                continue
+            try:
+                value = float(item[1])
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                weights[key] = weights.get(key, 0.0) + value
+        total = sum(weights.values()) or 1.0
+        return {key: value / total for key, value in weights.items()}
+
+    def _persist_watch_first(self, profile: dict[str, Any]) -> None:
+        """Store compact Plex-watch preferences and seed learned genre weights."""
+        if profile.get("source") != "playback_history":
+            return
+        top_genres = list(profile.get("top_genres") or [])[:8]
+        shares = self._relative_weights(top_genres)
+        now = timestamp()
+        compact = {
+            "source": "playback_history",
+            "top_genres": top_genres,
+            "top_decades": list(profile.get("top_decades") or [])[:6],
+            "top_directors": list(profile.get("top_directors") or [])[:5],
+            "total_watched": profile.get("total_watched"),
+            "updated_at": now,
+        }
+        try:
+            with sqlite3.connect(CONTROL_DB) as connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS user_taste_memory (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO user_taste_memory (key, value_json, updated_at) VALUES (?, ?, ?)",
+                    ("watch_first_profile", json.dumps(compact, sort_keys=True), now),
+                )
+                row = connection.execute("SELECT value_json FROM user_taste_memory WHERE key='learned_taste_profile'").fetchone()
+                learned = {}
+                if row and row[0]:
+                    try:
+                        parsed = json.loads(row[0])
+                        if isinstance(parsed, dict):
+                            learned = parsed
+                    except json.JSONDecodeError:
+                        learned = {}
+                changed = False
+                for genre, share in shares.items():
+                    key = genre.casefold()
+                    target = round(1.0 + min(1.8, share * 3.0), 2)
+                    current = float(learned.get(key) or learned.get(genre) or 1.0)
+                    if target > current:
+                        learned[key] = target
+                        changed = True
+                if changed:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO user_taste_memory (key, value_json, updated_at) VALUES (?, ?, ?)",
+                        ("learned_taste_profile", json.dumps(learned, sort_keys=True), now),
+                    )
+        except sqlite3.Error:
+            return
+        self._seed_implicit_watch_feedback(profile)
+
+    def _seed_implicit_watch_feedback(self, profile: dict[str, Any]) -> None:
+        """One durable good-feedback row from Plex watch genres so scoring is not catalog-shaped."""
+        if self._decision_feedback():
+            return
+        genres = [str(item[0]) for item in (profile.get("top_genres") or [])[:4] if item]
+        if not genres:
+            return
+        now = timestamp()
+        decision_id = "implicit-watch-taste"
+        note = "Prefer " + ", ".join(genres) + " from Plex watch history over owned-library majority"
+        reasons = {"genres": genres, "source": "plex_watch_history", "implicit": True}
+        try:
+            with sqlite3.connect(CONTROL_DB) as connection:
+                connection.execute(
+                    """INSERT OR IGNORE INTO decision_log (decision_id, actor, category, subject, decision, reasons_json, outcome_json, created_at, updated_at)
+                       VALUES (?, 'playback', 'taste_seed', 'Plex watch-history taste', 'implicit_good', ?, '{}', ?, ?)""",
+                    (decision_id, json.dumps(reasons, sort_keys=True), now, now),
+                )
+                connection.execute(
+                    """INSERT OR IGNORE INTO decision_feedback (decision_id, actor, sentiment, note, created_at)
+                       VALUES (?, 'playback', 'good', ?, ?)""",
+                    (decision_id, note, now),
+                )
+        except sqlite3.Error:
+            return
+
     def _score_components(self, candidate: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
         genres = [str(value) for value in (candidate.get("genres") or [])]
         genre_keys = {genre.casefold() for genre in genres}
-        top_genres = dict(profile.get("top_genres", []))
         year = candidate.get("year")
-        genre_points = min(45.0, sum(float(top_genres.get(genre, 0) or 0) for genre in genres) * 2.5)
+        genre_shares = {key.casefold(): value for key, value in self._relative_weights(profile.get("top_genres", [])).items()}
+        genre_points = min(45.0, sum(genre_shares.get(genre.casefold(), 0.0) * 90.0 for genre in genres))
         learned = profile.get("learned_taste_profile") or {}
         learned_points = 0.0
         if isinstance(learned, dict) and genre_keys:
             learned_points = min(12.0, sum(max(-2.0, min(4.0, float(learned.get(genre, 0) or 0) - 1.0)) * 3.0 for genre in genre_keys))
         decade_points = 0.0
         if isinstance(year, int):
-            decade_points = min(15.0, float(dict(profile.get("top_decades", [])).get(f"{year // 10 * 10}s", 0) or 0) * 1.5)
+            decade_shares = self._relative_weights(profile.get("top_decades", []))
+            decade_points = min(15.0, float(decade_shares.get(f"{year // 10 * 10}s", 0) or 0) * 25.0)
         director_points = min(12.0, float(dict(profile.get("top_directors", [])).get(str(candidate.get("director", "")).strip(), 0) or 0) * 2.0)
         actor_points = min(12.0, sum(float(dict(profile.get("top_actors", [])).get(actor, 0) or 0) for actor in (candidate.get("actors") or [])))
         studio_points = min(6.0, float(dict(profile.get("top_studios", [])).get(str(candidate.get("studio", "")), 0) or 0))
@@ -389,20 +488,23 @@ class DiscoveryEngine:
         if collection_name:
             theatrical_bonus += 3.0
         acquisition_confidence = self._bounded(35 + (45 if stable_id else 0) + (10 if candidate.get("title") else 0) + (10 if year else 0) + theatrical_bonus)
+        watch_first = str(profile.get("source") or "") == "playback_history"
+        weights = (0.50, 0.12, 0.13, 0.10, 0.15) if watch_first else (0.35, 0.20, 0.20, 0.10, 0.15)
         overall = self._bounded(
-            watch_affinity * 0.35
-            + collection_significance * 0.20
-            + rarity_preservation * 0.20
-            + storage_cost * 0.10
-            + acquisition_confidence * 0.15
+            watch_affinity * weights[0]
+            + collection_significance * weights[1]
+            + rarity_preservation * weights[2]
+            + storage_cost * weights[3]
+            + acquisition_confidence * weights[4]
         )
+        blend = "50/12/13/10/15 watch-first" if watch_first else "35/20/20/10/15 component blend"
         reasons = [
-            {"component": "watch_affinity", "score": watch_affinity, "detail": f"playback genre/decade/creator fit; learned_taste {learned_points:+.1f}; {feedback_matches} title feedback match(es); feedback_delta {feedback_delta:+.0f}"},
+            {"component": "watch_affinity", "score": watch_affinity, "detail": f"relative genre/decade/creator fit; learned_taste {learned_points:+.1f}; {feedback_matches} title feedback match(es); feedback_delta {feedback_delta:+.0f}"},
             {"component": "collection_significance", "score": collection_significance, "detail": "franchise/collection and series completeness metadata"},
             {"component": "rarity_preservation", "score": rarity_preservation, "detail": f"preservation markers: {', '.join(rarity_matches) if rarity_matches else 'none'}"},
             {"component": "storage_cost", "score": storage_cost, "detail": f"higher is lower estimated storage cost ({estimated_cost:.1f} GB-equivalent)"},
             {"component": "acquisition_confidence", "score": acquisition_confidence, "detail": f"validated ids/metadata; theatrical feature bias +{theatrical_bonus:.0f}"},
-            {"component": "overall", "score": overall, "detail": "weighted 35/20/20/10/15 component blend"},
+            {"component": "overall", "score": overall, "detail": f"weighted {blend}"},
         ]
         return {
             "watch_affinity_score": watch_affinity,
@@ -427,12 +529,22 @@ class DiscoveryEngine:
             raise AgentError("Gemini is not configured for discovery")
         profile = self.taste_profile()
         already_suggested = self._existing_candidate_titles()
+        watch_genres = [item[0] for item in (profile.get("top_genres") or [])[:6]]
+        watch_decades = [item[0] for item in (profile.get("top_decades") or [])[:4]]
+        recently_watched = [item.get("title") for item in (profile.get("recent_activity") or [])[:12] if item.get("title")]
         prompt = {
             "role": "You are a careful film and television discovery curator.",
-            "instruction": "Return only JSON. Suggest 15 genuinely distinctive, fresh, less-obvious titles that are unlikely to already be in this very large collection. Avoid famous default recommendations, avoid every title in existing_titles_sample, and DO NOT suggest any title in do_not_suggest_titles. Keep media types separate and include a concise reason.",
+            "instruction": "Return only JSON. Suggest distinctive theatrical movies that match watched taste, not the owned-library majority. Prefer prefer_genres and prefer_decades. Deprioritize filling Drama gaps unless the title also matches Comedy, Animation, or recent watch activity. Avoid famous default recommendations and every title in do_not_suggest_titles. Keep media types separate and include a concise reason.",
             "schema": [{"title": "string", "year": 2020, "media_type": "movie", "reason": "string"}],
             "do_not_suggest_titles": already_suggested,
-            "taste_profile": profile,
+            "taste": {
+                "source": profile.get("source"),
+                "prefer_genres": watch_genres,
+                "prefer_decades": watch_decades,
+                "prefer_directors": [item[0] for item in (profile.get("top_directors") or [])[:5]],
+                "recently_watched": recently_watched,
+                "learned_taste_profile": profile.get("learned_taste_profile") or {},
+            },
             "count": limit,
         }
         response = self.model.complete([{"role": "system", "content": prompt["role"]}, {"role": "user", "content": json.dumps(prompt)}], temperature=0.75)
