@@ -1,0 +1,14 @@
+---
+description: Commit and push meaningful changes to GitHub after each task
+alwaysApply: true
+---
+
+# GitHub backup (each change)
+
+After finishing a meaningful code or docs change in this repo:
+
+1. Commit with a concise message (why, not just what).
+2. Push to `origin` on the current branch (`git push -u origin HEAD` if needed).
+3. Never commit secrets: `.env`, `.env.*`, `*.bak` with credentials, tokens, API keys, auth dumps.
+4. Prefer committing app code, tests, docs, `.env.example`, and intentional scripts/audit notes.
+5. If `gh` / push auth fails, tell the user to run `gh auth login -h github.com` and retry the push — do not skip the backup silently.
