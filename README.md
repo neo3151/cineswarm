@@ -25,7 +25,7 @@ The SQLite catalog is the complete collection; the markdown file intentionally c
 
 ## Phase 1 Control Plane
 
-`cineswarm_control.py` starts a local web dashboard and a read-only multi-service control plane. It observes Plex, Radarr, and Sonarr, stores service snapshots, records audit events, and exposes catalog counts. No server write actions are enabled in this phase.
+`cineswarm_control.py` starts a local web dashboard and a read-only multi-service control plane. It observes Plex, Radarr, and Sonarr, stores service snapshots, records audit events, and exposes catalog counts. Product monitoring adds `GET /api/monitoring/snapshot` (and `/api/v1/...`), Discord `!cine monitor`, and optional `CINESWARM_MONITOR_WEBHOOK` transition alerts. No server write actions are enabled in this phase.
 
 ```bash
 python3 cineswarm_control.py

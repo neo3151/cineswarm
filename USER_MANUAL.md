@@ -94,6 +94,7 @@ or mention the bot:
 | `!cine help` | Show the command list | No |
 | `!cine status` | Show service, worker, catalog, and queue health | No |
 | `!cine health` | Alias for status | No |
+| `!cine monitor` | Live ops digest from `/api/monitoring/snapshot` (queues, worker, top issues) | No |
 | `!cine queue` | List actual Radarr/Sonarr releases, states, progress, remaining size, time, and errors | No |
 | `!cine discover` | Show ranked missing candidates with acquisition IDs | No |
 | `!cine discover refresh` | Run Gemini discovery immediately and show verified results | Local queue only |
@@ -544,6 +545,53 @@ It returns HTTP 200 only when:
 - All three service snapshots are present
 
 Use this endpoint with Uptime Kuma or another external monitor.
+
+### Unified monitoring snapshot
+
+```text
+http://192.168.1.23:8787/api/monitoring/snapshot
+http://192.168.1.23:8787/api/v1/monitoring/snapshot
+```
+
+Returns compact JSON for external watchers and Discord live monitor:
+
+- `overall_status` — `healthy`, `degraded`, or `unhealthy`
+- Service rows, worker heartbeat/age, download queue counts
+- Pending approval task counts, bounded recent failure summary
+- `emergency_stop` flag and `generated_at`
+
+The endpoint is read-only, free of secrets, and available without dashboard authentication (same model as `/api/health`). Uptime Kuma can keep using `/api/health` for binary up/down checks; use the snapshot when a watcher needs richer queue and failure context.
+
+Discord:
+
+```text
+!cine monitor
+/monitor
+```
+
+Formats a short ops digest from the same snapshot (overall status, queue depths, worker freshness, top issues). It complements — and does not replace — existing `!cine status` / `!cine health`.
+
+### External monitor webhook
+
+Optional env `CINESWARM_MONITOR_WEBHOOK`. On worker `service_refresh` health checks, CineSwarm POSTs a small JSON payload when overall status **transitions** to `unhealthy`/`degraded` or recovers to `healthy`. Same-status refresh cycles are suppressed. If unset, behavior is unchanged.
+
+Example payload:
+
+```json
+{
+  "event_type": "monitor_status_transition",
+  "status": "degraded",
+  "previous_status": "healthy",
+  "unhealthy_services": ["sonarr"],
+  "worker_healthy": true,
+  "emergency_stop": false,
+  "timestamp": "2026-09-07T17:00:00+00:00"
+}
+```
+
+This webhook is independent of Discord chat alerts (`CINESWARM_DISCORD_WEBHOOK` / `CINESWARM_NOTIFICATION_WEBHOOK`). Use it for PagerDuty, ntfy, Slack incoming webhooks, or custom collectors.
+
+The Overview dashboard includes a Monitoring snapshot card with overall status, queue counts, last alert, and a link to `/api/monitoring/snapshot`.
 
 ---
 

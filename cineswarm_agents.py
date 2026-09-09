@@ -684,12 +684,12 @@ class AcquisitionPlanner:
                 upgrade_candidates.append({"service_id": item.get("id"), "title": item.get("title"), "year": item.get("year"), "current_quality": name, "cutoff_quality": cutoff_name, "quality_profile": profile.get("name")})
         return {"media_type": media_type, "snapshot_fetched_at": snapshot.get("_fetched_at"), "managed": len(items), "with_files": len(items) - missing, "without_files": missing, "quality_distribution": quality_counts, "upgrade_candidate_count": len(upgrade_candidates), "upgrade_candidates": upgrade_candidates[:100], "note": "Upgrade candidates are advisory. Profiles named Any are not treated as upgrade policies. No searches, replacements, or deletions occur during analysis."}
 
-    def queue(self, media_type: str) -> dict[str, Any]:
+    def queue(self, media_type: str, timeout: float | None = None) -> dict[str, Any]:
         if media_type not in ("movie", "series"):
             raise AgentError("media_type must be movie or series")
         client = self.radarr if media_type == "movie" else self.sonarr
         include_unknown_key = "includeUnknownMovieItems" if media_type == "movie" else "includeUnknownSeriesItems"
-        result = client.get("api/v3/queue", {"page": 1, "pageSize": 1000, include_unknown_key: "true"})
+        result = client.get("api/v3/queue", {"page": 1, "pageSize": 1000, include_unknown_key: "true"}, timeout=timeout)
         records = result.get("records", []) if isinstance(result, dict) else []
         return {
             "media_type": media_type,
@@ -697,12 +697,19 @@ class AcquisitionPlanner:
             "records": [{"id": item.get("id"), "download_id": item.get("downloadId"), "title": item.get("title"), "status": item.get("status"), "tracked_download_state": item.get("trackedDownloadState"), "error_message": item.get("errorMessage")} for item in records],
         }
 
-    def global_queue_pressure(self, limit: int) -> dict[str, Any]:
+    def global_queue_pressure(self, limit: int, timeout: float | None = None) -> dict[str, Any]:
+        probe_timeout = float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5") if timeout is None else timeout)
         failed_statuses = {"failed", "warning", "importfailed", "importfailedpathdoesnotexist"}
         sources = {"radarr": 0, "sonarr": 0, "sabnzbd": 0}
         unique: dict[str, dict[str, Any]] = {}
+        source_errors: dict[str, str] = {}
         for media_type, source in (("movie", "radarr"), ("series", "sonarr")):
-            for record in self.queue(media_type)["records"]:
+            try:
+                records = self.queue(media_type, timeout=probe_timeout)["records"]
+            except Exception as exc:
+                source_errors[source] = exc.__class__.__name__
+                continue
+            for record in records:
                 if str(record.get("status") or "").lower() in failed_statuses:
                     continue
                 download_id = record.get("download_id")
@@ -717,7 +724,7 @@ class AcquisitionPlanner:
             query = urllib.parse.urlencode({"mode": "queue", "output": "json", "apikey": sab_key})
             try:
                 request = urllib.request.Request(f"{sab_url}/api?{query}", headers={"Accept": "application/json"}, method="GET")
-                with urllib.request.urlopen(request, timeout=float(os.environ.get("CINESWARM_API_TIMEOUT", "60"))) as response:
+                with urllib.request.urlopen(request, timeout=probe_timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 slots = payload.get("queue", {}).get("slots", []) if isinstance(payload, dict) else []
                 for slot in slots:
@@ -725,10 +732,13 @@ class AcquisitionPlanner:
                     key = f"download:{download_id}" if download_id else f"sabnzbd:{slot.get('filename')}"
                     sources["sabnzbd"] += 1
                     unique.setdefault(key, {"source": "sabnzbd", "download_id": download_id, "title": slot.get("filename"), "status": slot.get("status")})
-            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
                 sab_error = exc.__class__.__name__
         active = len(unique)
-        return {"status": "pressured" if active >= limit else "available", "pressured": active >= limit, "active": active, "limit": limit, "sources": sources, "records": list(unique.values()), "sabnzbd": {"configured": sab_configured, "error": sab_error}}
+        result = {"status": "pressured" if active >= limit else "available", "pressured": active >= limit, "active": active, "limit": limit, "sources": sources, "records": list(unique.values()), "sabnzbd": {"configured": sab_configured, "error": sab_error}}
+        if source_errors:
+            result["errors"] = source_errors
+        return result
 
     def grab_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         movie_id = payload.get("movie_id")

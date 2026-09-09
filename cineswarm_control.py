@@ -76,7 +76,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_REFRESH_INTERVAL", "CINESWARM_CATALOG_INTERVAL", "CINESWARM_RECONCILE_INTERVAL",
     "CINESWARM_QUEUE_INTERVAL", "CINESWARM_DISCOVERY_INTERVAL", "CINESWARM_AUTONOMOUS_INTERVAL",
     "CINESWARM_FAILED_DOWNLOAD_INTERVAL",
-    "CINESWARM_DISCOVERY_ENABLED", "CINESWARM_NOTIFICATION_WEBHOOK", "CINESWARM_DISCORD_WEBHOOK",
+    "CINESWARM_DISCOVERY_ENABLED", "CINESWARM_NOTIFICATION_WEBHOOK", "CINESWARM_MONITOR_WEBHOOK", "CINESWARM_DISCORD_WEBHOOK",
     "CINESWARM_DISCORD_BOT_TOKEN", "CINESWARM_DISCORD_GUILD_IDS", "CINESWARM_DISCORD_CHANNEL_IDS",
     "CINESWARM_DISCORD_USER_IDS", "CINESWARM_DISCORD_SETUP_CODE", "CINESWARM_DISCORD_REQUIRE_MENTION", "CINESWARM_DISCORD_PREFIX",
     "CINESWARM_NOTIFICATION_COOLDOWN", "CINESWARM_HEARTBEAT_STALE_SECONDS", "CINESWARM_NOTIFY_ON_FAILED_DOWNLOAD",
@@ -98,6 +98,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/discovery": "/api/discovery",
     "/api/v1/operations/queue": "/api/operations/queue",
     "/api/v1/preservation": "/api/preservation",
+    "/api/v1/monitoring/snapshot": "/api/monitoring/snapshot",
 }
 
 
@@ -239,6 +240,24 @@ def redact(value: Any) -> Any:
     return value
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def json_text(value: Any) -> str:
     return json.dumps(redact(value), ensure_ascii=False, sort_keys=True)
 
@@ -271,7 +290,7 @@ class ReadOnlyApiClient:
         self.config = config
         self.timeout = timeout
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def get(self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
         query = urllib.parse.urlencode({key: value for key, value in (params or {}).items() if value is not None})
         url = self.config.url.rstrip("/") + "/" + path.lstrip("/")
         if query:
@@ -281,7 +300,7 @@ class ReadOnlyApiClient:
             request.add_header(self.config.header, self.config.api_key)
         request.add_header("Accept", "application/json")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise ServiceError(f"{self.config.name} returned HTTP {exc.code}") from exc
@@ -295,7 +314,7 @@ class PlexApiClient:
         self.config = config
         self.timeout = timeout
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> ET.Element:
+    def get(self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> ET.Element:
         values = {key: value for key, value in (params or {}).items() if value is not None}
         query = urllib.parse.urlencode(values)
         url = self.config.url.rstrip("/") + "/" + path.lstrip("/")
@@ -306,7 +325,7 @@ class PlexApiClient:
             request.add_header("X-Plex-Token", self.config.api_key)
         request.add_header("Accept", "application/xml")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 body = response.read()
                 return ET.fromstring(body) if body else ET.Element("MediaContainer")
         except urllib.error.HTTPError as exc:
@@ -407,6 +426,65 @@ class PlexWriteClient(PlexApiClient):
         except Exception:
             return False
 
+    def refresh_libraries(self, path: str | None = None) -> dict[str, Any]:
+        """Refresh Plex library sections so newly fixed/imported paths get indexed.
+
+        Optional ``path`` narrows to sections whose Location roots overlap that
+        path. If nothing matches (common with Docker path maps), falls back to
+        refreshing every section so reconcile follow-ups still heal indexing.
+        """
+        root = self.get("library/sections")
+        directories = list(root.findall("Directory"))
+        selected: list[ET.Element] = []
+        path_norm = (path or "").replace("\\", "/").rstrip("/")
+
+        for directory in directories:
+            locations = [
+                (loc.get("path") or "").replace("\\", "/").rstrip("/")
+                for loc in directory.findall("Location")
+            ]
+            if not path_norm or not locations:
+                selected.append(directory)
+                continue
+            matched = False
+            for loc in locations:
+                if not loc:
+                    continue
+                if (
+                    path_norm == loc
+                    or path_norm.startswith(loc + "/")
+                    or loc.startswith(path_norm + "/")
+                    or loc in path_norm
+                    or path_norm in loc
+                ):
+                    matched = True
+                    break
+            if matched:
+                selected.append(directory)
+
+        if path_norm and not selected:
+            selected = directories
+
+        refreshed: list[dict[str, Any]] = []
+        for directory in selected:
+            key = directory.get("key")
+            if not key:
+                continue
+            self.post(f"library/sections/{key}/refresh")
+            refreshed.append(
+                {
+                    "section_key": key,
+                    "title": directory.get("title"),
+                    "type": directory.get("type"),
+                }
+            )
+
+        return {
+            "status": "ok",
+            "path": path,
+            "refreshed_count": len(refreshed),
+            "sections": refreshed,
+        }
 
 
 class ArrWriteClient:
@@ -416,8 +494,8 @@ class ArrWriteClient:
         self.timeout = timeout
         self.reader = ReadOnlyApiClient(config, timeout)
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return self.reader.get(path, params)
+    def get(self, path: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
+        return self.reader.get(path, params, timeout=timeout)
 
     def post_json(self, path: str, payload: dict[str, Any]) -> Any:
         url = self.config.url.rstrip("/") + "/" + path.lstrip("/")
@@ -498,32 +576,165 @@ class PlexConnector:
             "RatingKey": element.get("ratingKey"),
         }
 
-    def get_sessions(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _session_streams(part: Any) -> dict[str, Any]:
+        video_streams, audio_streams, subtitle_streams = [], [], []
+        if part is None:
+            return {"video": video_streams, "audio": audio_streams, "subtitle": subtitle_streams}
+        for stream in part.findall("Stream"):
+            entry = {
+                "id": stream.get("id"),
+                "stream_type": stream.get("streamType"),
+                "codec": stream.get("codec"),
+                "display_title": stream.get("displayTitle"),
+                "language": stream.get("language") or stream.get("languageTag"),
+                "language_code": stream.get("languageCode"),
+                "selected": stream.get("selected") in ("1", "true", True),
+                "default": stream.get("default") in ("1", "true", True),
+                "forced": stream.get("forced") in ("1", "true", True),
+                "bitrate": _safe_int(stream.get("bitrate")),
+                "width": _safe_int(stream.get("width")),
+                "height": _safe_int(stream.get("height")),
+                "frame_rate": stream.get("frameRate"),
+                "profile": stream.get("profile"),
+                "channels": _safe_int(stream.get("channels")),
+                "audio_channel_layout": stream.get("audioChannelLayout"),
+                "bit_depth": _safe_int(stream.get("bitDepth")),
+                "sampling_rate": _safe_int(stream.get("samplingRate")),
+                "decision": stream.get("decision"),
+                "location": stream.get("location"),
+            }
+            stream_type = str(stream.get("streamType") or "")
+            if stream_type == "1":
+                video_streams.append(entry)
+            elif stream_type == "2":
+                audio_streams.append(entry)
+            elif stream_type == "3":
+                subtitle_streams.append(entry)
+        return {"video": video_streams, "audio": audio_streams, "subtitle": subtitle_streams}
+
+    def get_sessions(self, timeout: float | None = None) -> list[dict[str, Any]]:
         try:
-            container = self.client.get("status/sessions")
+            container = self.client.get("status/sessions", timeout=timeout)
             sessions = []
-            for video in container.findall("Video"):
+            for video in list(container.findall("Video")) + list(container.findall("Track")):
                 player = video.find("Player")
                 transcode = video.find("TranscodeSession")
                 user = video.find("User")
                 media = video.find("Media")
+                part = media.find("Part") if media is not None else None
+                streams = self._session_streams(part)
+                selected_video = next((s for s in streams["video"] if s.get("selected")), streams["video"][0] if streams["video"] else {})
+                selected_audio = next((s for s in streams["audio"] if s.get("selected")), streams["audio"][0] if streams["audio"] else {})
+                selected_subtitle = next((s for s in streams["subtitle"] if s.get("selected")), None)
+                duration_ms = _safe_int(video.get("duration")) or 0
+                view_offset_ms = _safe_int(video.get("viewOffset")) or 0
+                progress_pct = round(min(100.0, (view_offset_ms / duration_ms) * 100.0), 1) if duration_ms > 0 else None
+                video_decision = (transcode.get("videoDecision") if transcode is not None else None) or (part.get("decision") if part is not None else None) or "directplay"
+                audio_decision = (transcode.get("audioDecision") if transcode is not None else None) or (selected_audio.get("decision") if selected_audio else None) or "directplay"
+                subtitle_decision = transcode.get("subtitleDecision") if transcode is not None else (selected_subtitle.get("decision") if selected_subtitle else None)
+                hw_decoding = transcode.get("transcodeHwDecoding") if transcode is not None else None
+                hw_encoding = transcode.get("transcodeHwEncoding") if transcode is not None else None
                 sessions.append({
+                    "session_key": video.get("sessionKey"),
+                    "rating_key": video.get("ratingKey"),
                     "title": video.get("title"),
                     "grandparent_title": video.get("grandparentTitle"),
+                    "parent_title": video.get("parentTitle"),
+                    "original_title": video.get("originalTitle"),
                     "type": video.get("type"),
-                    "user": user.get("title") if user is not None else "Unknown",
-                    "player": player.get("product") if player is not None else "Unknown",
-                    "state": player.get("state") if player is not None else "playing",
+                    "year": _safe_int(video.get("year")),
+                    "library_section": video.get("librarySectionTitle"),
+                    "content_rating": video.get("contentRating"),
+                    "summary": video.get("summary"),
+                    "thumb": video.get("thumb") or video.get("parentThumb") or video.get("grandparentThumb"),
+                    "art": video.get("art") or video.get("grandparentArt"),
+                    "duration_ms": duration_ms or None,
+                    "view_offset_ms": view_offset_ms or None,
+                    "progress_percent": progress_pct,
+                    "remaining_ms": (duration_ms - view_offset_ms) if duration_ms > view_offset_ms else 0,
+                    "user": {
+                        "id": user.get("id") if user is not None else None,
+                        "title": user.get("title") if user is not None else "Unknown",
+                        "thumb": user.get("thumb") if user is not None else None,
+                    },
+                    "player": {
+                        "title": player.get("title") if player is not None else None,
+                        "product": player.get("product") if player is not None else None,
+                        "platform": player.get("platform") if player is not None else None,
+                        "device": player.get("device") if player is not None else None,
+                        "address": player.get("address") if player is not None else None,
+                        "state": player.get("state") if player is not None else "playing",
+                        "local": player.get("local") in ("1", "true", True) if player is not None else None,
+                        "relayed": player.get("relayed") in ("1", "true", True) if player is not None else None,
+                        "secure": player.get("secure") in ("1", "true", True) if player is not None else None,
+                        "user_id": player.get("userID") if player is not None else None,
+                        "machine_identifier": player.get("machineIdentifier") if player is not None else None,
+                        "version": player.get("version") if player is not None else None,
+                    },
+                    "media": {
+                        "container": (media.get("container") if media is not None else None) or (part.get("container") if part is not None else None),
+                        "video_codec": media.get("videoCodec") if media is not None else selected_video.get("codec"),
+                        "audio_codec": media.get("audioCodec") if media is not None else selected_audio.get("codec"),
+                        "audio_channels": _safe_int(media.get("audioChannels") if media is not None else selected_audio.get("channels")),
+                        "video_resolution": media.get("videoResolution") if media is not None else None,
+                        "width": _safe_int(media.get("width") if media is not None else selected_video.get("width")),
+                        "height": _safe_int(media.get("height") if media is not None else selected_video.get("height")),
+                        "bitrate": _safe_int(media.get("bitrate") if media is not None else None) or _safe_int(part.get("bitrate") if part is not None else None),
+                        "video_frame_rate": media.get("videoFrameRate") if media is not None else selected_video.get("frame_rate"),
+                        "video_profile": media.get("videoProfile") if media is not None else selected_video.get("profile"),
+                        "audio_profile": media.get("audioProfile") if media is not None else None,
+                        "aspect_ratio": media.get("aspectRatio") if media is not None else None,
+                        "file": part.get("file") if part is not None else None,
+                        "size": _safe_int(part.get("size") if part is not None else None),
+                        "decision": part.get("decision") if part is not None else None,
+                    },
+                    "streams": streams,
+                    "selected_streams": {
+                        "video": selected_video or None,
+                        "audio": selected_audio or None,
+                        "subtitle": selected_subtitle,
+                    },
+                    "playback": {
+                        "video_decision": video_decision,
+                        "audio_decision": audio_decision,
+                        "subtitle_decision": subtitle_decision,
+                        "mode": (
+                            "transcode" if "transcode" in str(video_decision).lower()
+                            else "copy" if "copy" in str(video_decision).lower()
+                            else "directplay"
+                        ),
+                    },
                     "transcode": {
-                        "video_decision": transcode.get("videoDecision") if transcode is not None else "direct",
-                        "audio_decision": transcode.get("audioDecision") if transcode is not None else "direct",
-                        "hw_decoding": transcode.get("transcodeHwDecoding") if transcode is not None else None,
-                        "hw_encoding": transcode.get("transcodeHwEncoding") if transcode is not None else None,
+                        "active": transcode is not None,
+                        "key": transcode.get("key") if transcode is not None else None,
+                        "throttled": transcode.get("throttled") in ("1", "true", True) if transcode is not None else None,
+                        "complete": transcode.get("complete") in ("1", "true", True) if transcode is not None else None,
+                        "progress": _safe_float(transcode.get("progress")) if transcode is not None else None,
+                        "speed": _safe_float(transcode.get("speed")) if transcode is not None else None,
+                        "duration": _safe_int(transcode.get("duration")) if transcode is not None else None,
+                        "video_decision": video_decision,
+                        "audio_decision": audio_decision,
+                        "subtitle_decision": subtitle_decision,
+                        "container": transcode.get("container") if transcode is not None else None,
+                        "video_codec": transcode.get("videoCodec") if transcode is not None else None,
+                        "audio_codec": transcode.get("audioCodec") if transcode is not None else None,
+                        "audio_channels": _safe_int(transcode.get("audioChannels")) if transcode is not None else None,
+                        "width": _safe_int(transcode.get("width")) if transcode is not None else None,
+                        "height": _safe_int(transcode.get("height")) if transcode is not None else None,
+                        "hw_requested": transcode.get("transcodeHwRequested") in ("1", "true", True) if transcode is not None else None,
+                        "hw_full_pipeline": transcode.get("transcodeHwFullPipeline") in ("1", "true", True) if transcode is not None else None,
+                        "hw_decoding": hw_decoding,
+                        "hw_encoding": hw_encoding,
                         "hw_decoding_title": transcode.get("transcodeHwDecodingTitle") if transcode is not None else None,
                         "hw_encoding_title": transcode.get("transcodeHwEncodingTitle") if transcode is not None else None,
-                        "progress": transcode.get("progress") if transcode is not None else "100",
-                    } if transcode is not None else None,
-                    "resolution": media.get("videoResolution") if media is not None else "1080p",
+                        "hw_active": bool(hw_decoding or hw_encoding),
+                    },
+                    # Flat aliases for older SSE / dashboard consumers
+                    "user_name": user.get("title") if user is not None else "Unknown",
+                    "player_name": (player.get("product") or player.get("title")) if player is not None else "Unknown",
+                    "state": player.get("state") if player is not None else "playing",
+                    "resolution": (media.get("videoResolution") if media is not None else None) or "unknown",
                 })
             return sessions
         except Exception:
@@ -2097,10 +2308,11 @@ class ControlPlane:
         detail = self.store.queue_detail(limit)
         downloads: dict[str, Any] = {"movies": {"records": [], "total_records": 0}, "series": {"records": [], "total_records": 0}}
         errors: dict[str, str] = {}
+        probe_timeout = float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5"))
         if self.planner:
             for media_type, key in (("movie", "movies"), ("series", "series")):
                 try:
-                    queue = self.planner.queue(media_type) or {}
+                    queue = self.planner.queue(media_type, timeout=probe_timeout) or {}
                     records = queue.get("records", []) if isinstance(queue, dict) else []
                     downloads[key] = {"records": records[:limit], "total_records": queue.get("total_records", queue.get("totalRecords", len(records)))}
                 except Exception as exc:
@@ -2108,6 +2320,176 @@ class ControlPlane:
         detail["downloads"] = downloads
         detail["errors"] = errors
         return detail
+
+    def monitoring_snapshot(self, hours: int = 24) -> dict[str, Any]:
+        """Compact read-only ops snapshot for external watchers and Discord live monitor."""
+        hours = max(1, min(int(hours), 168))
+        probe_timeout = float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5"))
+        status = self.store.status()
+        summary = self.store.operational_summary(hours=hours)
+        detail = self.store.queue_detail(limit=50)
+        services = status.get("services") or []
+        unhealthy = [item.get("service") for item in services if item.get("status") != "healthy"]
+        worker = status.get("worker") or {}
+        worker_healthy = bool(worker.get("healthy"))
+        healthy_count = sum(1 for item in services if item.get("status") == "healthy")
+        if len(services) >= 3 and not unhealthy and worker_healthy:
+            overall = "healthy"
+        elif services and healthy_count == 0:
+            overall = "unhealthy"
+        elif unhealthy and not worker_healthy:
+            overall = "unhealthy"
+        else:
+            overall = "degraded"
+        downloads = {"movies": 0, "series": 0, "total": 0}
+        download_errors: dict[str, str] = {}
+        queue_limit = max(1, int(os.environ.get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "2") or 2))
+        queue_pressure: dict[str, Any] = {
+            "status": "unavailable",
+            "pressured": False,
+            "active": 0,
+            "limit": queue_limit,
+            "sources": {"radarr": 0, "sonarr": 0, "sabnzbd": 0},
+            "records": [],
+            "sabnzbd": {"configured": False, "error": None},
+        }
+        # Single fail-soft probe: avoids double Radarr/Sonarr fetches and long SAB hangs.
+        if self.planner and hasattr(self.planner, "global_queue_pressure"):
+            try:
+                queue_pressure = self.planner.global_queue_pressure(queue_limit, timeout=probe_timeout)
+                sources = queue_pressure.get("sources") or {}
+                downloads["movies"] = int(sources.get("radarr") or 0)
+                downloads["series"] = int(sources.get("sonarr") or 0)
+                downloads["total"] = int(queue_pressure.get("active") or (downloads["movies"] + downloads["series"]))
+                if queue_pressure.get("errors"):
+                    download_errors.update({key: str(value) for key, value in queue_pressure["errors"].items()})
+                sab = queue_pressure.get("sabnzbd") or {}
+                if sab.get("error"):
+                    download_errors["sabnzbd"] = str(sab["error"])
+            except Exception as exc:
+                queue_pressure = {**queue_pressure, "error": str(exc)}
+                download_errors["queue_pressure"] = str(exc)
+        elif self.planner:
+            for media_type, key in (("movie", "movies"), ("series", "series")):
+                try:
+                    queue = self.planner.queue(media_type, timeout=probe_timeout) or {}
+                    downloads[key] = int(queue.get("total_records", queue.get("totalRecords", len(queue.get("records", []) or []))) or 0)
+                except Exception as exc:
+                    download_errors[key] = str(exc)
+            downloads["total"] = int(downloads["movies"]) + int(downloads["series"])
+            queue_pressure = {
+                **queue_pressure,
+                "status": "pressured" if downloads["total"] >= queue_limit else "available",
+                "pressured": downloads["total"] >= queue_limit,
+                "active": downloads["total"],
+                "sources": {"radarr": downloads["movies"], "sonarr": downloads["series"], "sabnzbd": 0},
+            }
+        task_counts = detail.get("task_counts") or {}
+        pending_approvals = int(task_counts.get("pending_approval", 0) or 0)
+        recent_failures = []
+        for issue in (summary.get("actionable_issues") or [])[:10]:
+            recent_failures.append({
+                "type": issue.get("type"),
+                "status": issue.get("status") or issue.get("state"),
+                "action": issue.get("action") or issue.get("task_type") or issue.get("path"),
+                "error": issue.get("error"),
+            })
+        observations = detail.get("observations") or []
+        observation_states: dict[str, int] = {}
+        for row in observations:
+            state = str(row.get("state") or "unknown")
+            observation_states[state] = observation_states.get(state, 0) + 1
+        library_integrity: dict[str, Any] = {"status": "unknown"}
+        try:
+            with self.store.lock, self.store._connect() as connection:
+                row = connection.execute(
+                    "SELECT status, details_json, created_at FROM audit_events WHERE action='reconcile_library' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+            if row:
+                payload = json.loads(row["details_json"] or "{}")
+                if isinstance(payload, dict) and isinstance(payload.get("result"), dict) and "movies" not in payload:
+                    payload = payload["result"]
+                movies = (payload.get("movies") or {}) if isinstance(payload, dict) else {}
+                series = (payload.get("series") or {}) if isinstance(payload, dict) else {}
+                library_integrity = {
+                    "status": row["status"],
+                    "checked_at": row["created_at"],
+                    "movies": {
+                        "managed": movies.get("managed"),
+                        "indexed": movies.get("indexed"),
+                        "without_file": movies.get("without_file"),
+                        "file_not_indexed": movies.get("file_not_indexed"),
+                        "path_missing": movies.get("path_missing"),
+                    },
+                    "series": {
+                        "managed": series.get("managed"),
+                        "indexed": series.get("indexed"),
+                        "not_indexed": series.get("not_indexed"),
+                        "path_missing": series.get("path_missing"),
+                    },
+                }
+        except Exception as exc:
+            library_integrity = {"status": "error", "error": str(exc)}
+        active_sessions = 0
+        try:
+            plex = getattr(self, "plex", None)
+            if plex is not None:
+                active_sessions = len(plex.get_sessions(timeout=probe_timeout) or [])
+        except Exception:
+            active_sessions = 0
+        return {
+            "overall_status": overall,
+            "services": [
+                {
+                    "service": item.get("service"),
+                    "status": item.get("status"),
+                    "fetched_at": item.get("fetched_at"),
+                    "item_count": item.get("item_count"),
+                    "error": item.get("error"),
+                }
+                for item in services
+            ],
+            "unhealthy_services": unhealthy,
+            "worker": {
+                "healthy": worker.get("healthy"),
+                "status": worker.get("status"),
+                "age_seconds": worker.get("age_seconds"),
+                "updated_at": worker.get("updated_at"),
+                "worker_id": worker.get("worker_id"),
+            },
+            "downloads": downloads,
+            "download_errors": download_errors,
+            "queue_pressure": {
+                "status": queue_pressure.get("status"),
+                "pressured": bool(queue_pressure.get("pressured")),
+                "active": int(queue_pressure.get("active") or 0),
+                "limit": int(queue_pressure.get("limit") or queue_limit),
+                "sources": queue_pressure.get("sources") or {},
+                "sabnzbd": queue_pressure.get("sabnzbd") or {},
+                "sample": [
+                    {"source": item.get("source"), "title": item.get("title"), "status": item.get("status") or item.get("tracked_download_state")}
+                    for item in (queue_pressure.get("records") or [])[:5]
+                ],
+                "error": queue_pressure.get("error"),
+            },
+            "library_integrity": library_integrity,
+            "acquisition_observations": {
+                "recent_count": len(observations),
+                "states": observation_states,
+            },
+            "active_sessions": active_sessions,
+            "pending_approvals": pending_approvals,
+            "task_counts": {key: int(value) for key, value in task_counts.items()},
+            "recent_failures": recent_failures,
+            "failure_summary": {
+                "audit_failures": (summary.get("audit") or {}).get("failures", 0),
+                "task_failures": (summary.get("tasks") or {}).get("failures", 0),
+                "actionable_issues": len(summary.get("actionable_issues") or []),
+                "window_hours": hours,
+            },
+            "emergency_stop": bool(self.store.is_emergency_stop()),
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
 
     def acquisition_plan(self, media_type: str, term: str, actor: str = "dashboard") -> dict[str, Any]:
         if not self.planner:
@@ -3300,7 +3682,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         requested_path = parsed.path
-        if requested_path not in {"/api/health", "/api/v1/health"} and not self._require_authentication():
+        if requested_path not in {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot"} and not self._require_authentication():
             return
         canonical_path = READ_ONLY_V1_ALIASES.get(requested_path, requested_path)
         self.path = canonical_path + (("?" + parsed.query) if parsed.query else "")
@@ -3310,6 +3692,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"name": "CineSwarm", "application_version": APPLICATION_VERSION, "api_version": API_VERSION, "supported_versions": [API_VERSION]})
         elif canonical_path == "/api/status":
             self._send(200, self.plane.store.status())
+        elif canonical_path in {"/api/sessions", "/api/v1/sessions"}:
+            sessions = []
+            try:
+                plex = getattr(self.plane, "plex", None)
+                if plex is not None:
+                    sessions = plex.get_sessions(timeout=float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5")))
+            except Exception as exc:
+                self._send(500, {"error": str(exc), "sessions": []})
+                return
+            self._send(200, {"count": len(sessions), "sessions": sessions, "generated_at": now()})
         elif canonical_path == "/api/transcode-shield":
             self._send(200, self.plane.probe_transcode_shield())
         elif canonical_path == "/api/diagnostics":
@@ -3321,6 +3713,14 @@ class Handler(BaseHTTPRequestHandler):
             worker_healthy = bool((status.get("worker") or {}).get("healthy"))
             healthy = worker_healthy and not unhealthy and len(status.get("services", [])) == 3
             self._send(200 if healthy else 503, {"status": "healthy" if healthy else "unhealthy", "worker": status.get("worker"), "unhealthy_services": unhealthy})
+        elif canonical_path == "/api/monitoring/snapshot":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                hours = int(query.get("hours", ["24"])[0])
+            except ValueError:
+                self._send(400, {"error": "hours must be an integer"})
+                return
+            self._send(200, self.plane.monitoring_snapshot(hours=hours))
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):
@@ -3436,8 +3836,8 @@ class Handler(BaseHTTPRequestHandler):
                     status = self.plane.store.status()
                     movies_q = self.plane.planner.queue("movie") if self.plane.planner else {}
                     series_q = self.plane.planner.queue("series") if self.plane.planner else {}
-                    plex_connector = self.plane.connectors.get("plex")
-                    plex_sessions = plex_connector.__self__.get_sessions() if plex_connector and hasattr(plex_connector, "__self__") else []
+                    plex = getattr(self.plane, "plex", None)
+                    plex_sessions = plex.get_sessions() if plex is not None else []
                     ai_thoughts = self.plane.get_recent_decisions(limit=6)
                     payload = json.dumps({"status": status, "movies_queue": movies_q.get("records", [])[:5], "series_queue": series_q.get("records", [])[:5], "plex_sessions": plex_sessions, "ai_thoughts": ai_thoughts, "timestamp": now()})
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
@@ -4022,7 +4422,8 @@ def make_plane() -> ControlPlane:
     connectors: dict[str, Callable[[], dict[str, Any]]] = {}
     plex_url = os.environ.get("PLEX_URL", "http://127.0.0.1:32400")
     plex_token = os.environ.get("PLEX_TOKEN", "")
-    connectors["plex"] = PlexConnector(ServiceConfig("plex", plex_url, plex_token, "X-Plex-Token")).snapshot
+    plex_connector = PlexConnector(ServiceConfig("plex", plex_url, plex_token, "X-Plex-Token"))
+    connectors["plex"] = plex_connector.snapshot
     radarr_config = ServiceConfig("radarr", os.environ.get("RADARR_URL", "http://127.0.0.1:7878"), os.environ.get("RADARR_API_KEY", ""), "X-Api-Key")
     sonarr_config = ServiceConfig("sonarr", os.environ.get("SONARR_URL", "http://127.0.0.1:8989"), os.environ.get("SONARR_API_KEY", ""), "X-Api-Key")
     connectors["radarr"] = ArrConnector(radarr_config, "movie").snapshot
@@ -4044,7 +4445,9 @@ def make_plane() -> ControlPlane:
         "sonarr_search_retry_request": planner.search,
     }
     writers = {"plex": plex_writer, "radarr": radarr_writer, "sonarr": sonarr_writer}
-    return ControlPlane(store, connectors, actions, planner, writers)
+    plane = ControlPlane(store, connectors, actions, planner, writers)
+    plane.plex = plex_connector
+    return plane
 
 
 def run_proactive_swarm_loop(plane: ControlPlane, interval_seconds: int = 300) -> None:

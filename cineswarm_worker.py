@@ -396,6 +396,83 @@ class Worker:
             print(f"Failed to send notification: {exc}", flush=True)
             return False
 
+    def _overall_monitor_status(self, refresh_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Derive compact overall status from refresh results and stored worker heartbeat."""
+        status = self.control_store.status()
+        services = status.get("services") or []
+        if refresh_result:
+            # Prefer just-refreshed statuses when available
+            merged = {item.get("service"): item for item in services if item.get("service")}
+            for name, details in refresh_result.items():
+                merged[name] = {"service": name, "status": details.get("status", "error"), "error": details.get("error")}
+            services = list(merged.values())
+        unhealthy = [item.get("service") for item in services if item.get("status") != "healthy"]
+        worker = status.get("worker") or {}
+        worker_healthy = bool(worker.get("healthy"))
+        healthy_count = sum(1 for item in services if item.get("status") == "healthy")
+        if len(services) >= 3 and not unhealthy and worker_healthy:
+            overall = "healthy"
+        elif services and healthy_count == 0:
+            overall = "unhealthy"
+        elif unhealthy and not worker_healthy:
+            overall = "unhealthy"
+        else:
+            overall = "degraded"
+        return {
+            "overall_status": overall,
+            "unhealthy_services": unhealthy,
+            "worker_healthy": worker_healthy,
+            "emergency_stop": bool(self.control_store.is_emergency_stop()),
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+    def _post_monitor_webhook_on_transition(self, refresh_result: dict[str, Any] | None = None) -> bool:
+        """POST to CINESWARM_MONITOR_WEBHOOK only when overall status transitions."""
+        url = os.environ.get("CINESWARM_MONITOR_WEBHOOK", "").strip()
+        if not url:
+            return False
+        payload = self._overall_monitor_status(refresh_result)
+        overall = payload["overall_status"]
+        previous = getattr(self, "_last_monitor_overall_status", None)
+        if previous is None:
+            stored = self.control_store.get_policy("CINESWARM_MONITOR_LAST_STATUS")
+            previous = stored
+        self._last_monitor_overall_status = overall
+        try:
+            self.control_store.set_policy("CINESWARM_MONITOR_LAST_STATUS", overall)
+        except Exception:
+            pass
+        if previous is None or previous == overall:
+            return False
+        should_notify = overall in {"unhealthy", "degraded"} or (
+            overall == "healthy" and previous in {"unhealthy", "degraded"}
+        )
+        if not should_notify:
+            return False
+        body = {
+            "event_type": "monitor_status_transition",
+            "status": overall,
+            "previous_status": previous,
+            "unhealthy_services": payload.get("unhealthy_services") or [],
+            "worker_healthy": payload.get("worker_healthy"),
+            "emergency_stop": payload.get("emergency_stop"),
+            "timestamp": payload.get("timestamp"),
+        }
+        try:
+            data = json.dumps(body).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=data,
+                method="POST",
+                headers={"Content-Type": "application/json", "User-Agent": "CineSwarm/1.0"},
+            )
+            with urllib.request.urlopen(request, timeout=10):
+                pass
+            return True
+        except Exception as exc:
+            print(f"Failed to post monitor webhook: {exc}", flush=True)
+            return False
+
     def execute(self, job: sqlite3.Row) -> dict[str, Any]:
         job_type = job["job_type"]
         readiness = self._startup_readiness() if job_type in ("autonomous_acquisition", "failed_download_recovery") else {"ready": True}
@@ -418,6 +495,7 @@ class Worker:
             unhealthy = {service: details for service, details in result.items() if details.get("status") != "healthy"}
             if unhealthy:
                 self._send_notification("service_unhealthy", {"services": unhealthy}, "service_unhealthy")
+            self._post_monitor_webhook_on_transition(result)
             return result
         if job_type == "catalog_sync":
             sync_catalog()
