@@ -322,7 +322,14 @@ class DiscoveryEngine:
             estimated_cost += min(50.0, len(candidate.get("seasons") or []) * 4.0)
         storage_cost = self._bounded(90.0 - estimated_cost)
         stable_id = self._stable_key("series" if candidate.get("tvdbId") else "movie", candidate)
-        acquisition_confidence = self._bounded(35 + (45 if stable_id else 0) + (10 if candidate.get("title") else 0) + (10 if year else 0))
+        theatrical_bonus = 0.0
+        if isinstance(runtime, (int, float)) and runtime >= 70 and not (candidate.get("seriesType") or candidate.get("seasons")):
+            theatrical_bonus += 8.0
+        if candidate.get("director") or (candidate.get("actors") or []):
+            theatrical_bonus += 4.0
+        if collection_name:
+            theatrical_bonus += 3.0
+        acquisition_confidence = self._bounded(35 + (45 if stable_id else 0) + (10 if candidate.get("title") else 0) + (10 if year else 0) + theatrical_bonus)
         overall = self._bounded(
             watch_affinity * 0.35
             + collection_significance * 0.20
@@ -335,7 +342,7 @@ class DiscoveryEngine:
             {"component": "collection_significance", "score": collection_significance, "detail": "franchise/collection and series completeness metadata"},
             {"component": "rarity_preservation", "score": rarity_preservation, "detail": f"preservation markers: {', '.join(rarity_matches) if rarity_matches else 'none'}"},
             {"component": "storage_cost", "score": storage_cost, "detail": f"higher is lower estimated storage cost ({estimated_cost:.1f} GB-equivalent)"},
-            {"component": "acquisition_confidence", "score": acquisition_confidence, "detail": "validated service identifier and metadata completeness"},
+            {"component": "acquisition_confidence", "score": acquisition_confidence, "detail": f"validated ids/metadata; theatrical feature bias +{theatrical_bonus:.0f}"},
             {"component": "overall", "score": overall, "detail": "weighted 35/20/20/10/15 component blend"},
         ]
         return {

@@ -560,18 +560,33 @@ class Worker:
             recent_cutoff = datetime.now(timezone.utc).year - recent_years
             queue.sort(key=lambda candidate: ((candidate.get("year", 0) >= recent_cutoff) != desired_recent, -candidate.get("score", 0)))
             managed_movies = self.plane.planner.radarr.get("api/v3/movie")
+            skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0}
+            near_misses: list[dict[str, Any]] = []
             for candidate in queue:
-                if candidate["media_type"] != "movie" or candidate["score"] < min_score or candidate["status"] not in ("new", "approved"):
+                if candidate["media_type"] != "movie" or candidate["status"] not in ("new", "approved"):
+                    skip_counts["non_movie_or_status"] += 1
+                    continue
+                if candidate["score"] < min_score:
+                    skip_counts["low_score"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "low_score"})
                     continue
                 candidate_detail = self.plane.discovery.candidate(candidate["id"])
                 if not candidate_detail:
+                    skip_counts["owned_or_missing_detail"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "owned_or_missing_detail"})
                     continue
                 genres = {genre.lower() for genre in candidate_detail.get("candidate", {}).get("genres", [])}
                 if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
+                    skip_counts["forbidden_genre"] += 1
+                    if len(near_misses) < 8:
+                        near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "forbidden_genre", "genres": sorted(genres & forbidden_genres) if forbidden_genres else sorted(genres)})
                     continue
                 plan = self.plane.planner.plan("movie", candidate["title"])
                 profile = next((item for item in plan.get("quality_profiles", []) if item.get("name") == required_profile), None)
                 if not plan.get("root_folders") or not profile:
+                    skip_counts["missing_profile_or_root"] += 1
                     continue
                 add_payload = {
                     "media_type": "movie",
@@ -605,7 +620,15 @@ class Worker:
                 self.control_store.complete_autonomous_action(action_id)
                 self.plane.discovery.set_status(candidate["id"], "approved")
                 return self._record_autopilot_decision("executed_recovery_search" if existing_movie else "executed_add_search", {"candidate_id": candidate["id"], "title": candidate["title"], "add_task_id": add_task_id, "search_task_id": search_task_id, "service_id": service_id, "command_id": search_result.get("result", {}).get("id")})
-            return self._record_autopilot_decision("skipped_no_eligible_candidate", {"desired_recent": desired_recent, "recent_cutoff": recent_cutoff, "candidate_count": len(queue)})
+            near_misses.sort(key=lambda item: -float(item.get("score") or 0))
+            return self._record_autopilot_decision("skipped_no_eligible_candidate", {
+                "desired_recent": desired_recent,
+                "recent_cutoff": recent_cutoff,
+                "candidate_count": len(queue),
+                "min_score": min_score,
+                "skip_counts": skip_counts,
+                "near_misses": near_misses[:5],
+            })
         if job_type == "failed_download_recovery":
             if self._emergency_stop():
                 return {"status": "blocked_emergency_stop", "approval_tasks_created": 0, "tasks": []}
