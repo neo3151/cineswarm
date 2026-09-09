@@ -66,10 +66,11 @@ CINESWARM_MODEL_PROVIDER=gemini
 CINESWARM_MODEL_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 CINESWARM_MODEL_API_KEY=
 CINESWARM_MODEL_NAME=gemini-2.5-flash
+CINESWARM_MODEL_FALLBACKS=gemini-2.0-flash,gemini-2.5-flash-lite
 CINESWARM_MODEL_TIMEOUT=30
 ```
 
-`GEMINI_API_KEY` or `GOOGLE_API_KEY` can be used instead of `CINESWARM_MODEL_API_KEY`, and `GEMINI_MODEL` can be used instead of `CINESWARM_MODEL_NAME`.
+`GEMINI_API_KEY` or `GOOGLE_API_KEY` can be used instead of `CINESWARM_MODEL_API_KEY`, and `GEMINI_MODEL` can be used instead of `CINESWARM_MODEL_NAME`. Discovery retries 503/429, then tries the native Gemini endpoint and fallback model names before giving up and rescoring the existing queue.
 
 This phase can analyze, recommend, and propose plans. It cannot change Plex, Radarr, Sonarr, files, downloads, users, or settings. Write-capable agents must be added to `Policy` with explicit scopes, approval records, and audit coverage before they are enabled.
 
@@ -144,7 +145,7 @@ CINESWARM_DISCORD_PREFIX=!cine
 
 For one-time setup, start the bot with a random `CINESWARM_DISCORD_SETUP_CODE`, then send `!cine pair CODE` in the desired server channel. CineSwarm stores that server, channel, and user as the allowlist; the code cannot pair another identity afterward. To move later, the paired user can send `!cine move CODE` in a different channel in the same server; the old channel is immediately deauthorized.
 
-Mention the bot or use `!cine`. Commands are `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, and `feedback ID good|bad NOTE`. `queue` lists actual Radarr/Sonarr releases with states, progress, remaining size, time, and errors. Full autopilot executes paired-user add, acquire, search, and exact-grab requests immediately after revalidation, records every decision and warning override, and reports outcomes to Discord. Feedback is joined into future Gemini discovery context. Family profiles change the rating ceiling and taste weights used by discovery. Legacy `confirm` remains available for older pending tasks.
+Mention the bot or use `!cine`. Commands are `status`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, and `feedback last|ID good|bad NOTE`. `queue` lists actual Radarr/Sonarr releases with states, progress, remaining size, time, and errors. Full autopilot executes paired-user add, acquire, search, and exact-grab requests immediately after revalidation, records every decision and warning override, and reports outcomes to Discord. Feedback is joined into future Gemini discovery context. Family profiles change the rating ceiling and taste weights used by discovery. Legacy `confirm` remains available for older pending tasks.
 
 The `.devin/cineswarm-discord.service` unit runs the bot with systemd restart and watchdog protection.
 

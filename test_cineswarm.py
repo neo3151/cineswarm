@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from cineswarm_agents import AcquisitionPlanner, PlaybackHistory, ReadOnlyTools
+from cineswarm_agents import AcquisitionPlanner, AgentError, HostedModelClient, PlaybackHistory, ReadOnlyTools
 from cineswarm_control import ControlPlane, ControlStore, Handler, LOCAL_ENV_KEYS, PlexConnector, Policy, ServiceError, service_error_message
 from cineswarm_discovery import DiscoveryEngine
 from cineswarm_discord import DiscordService
@@ -329,6 +329,14 @@ class DiscordServiceTests(unittest.TestCase):
             self.assertIn("`admin`", listed)
             self.assertIn("Kids Zone", switched)
             self.assertEqual(engine.get_active_profile()["profile_id"], "kids")
+
+    def test_feedback_last_marks_most_recent_decision(self):
+        calls = []
+        store = SimpleNamespace(decisions=lambda limit=1: [{"decision_id": "dec-last"}])
+        plane = SimpleNamespace(store=store, record_decision_feedback=lambda decision_id, sentiment, note, actor="": calls.append((decision_id, sentiment, note, actor)) or True)
+        response = DiscordService(plane).handle("feedback last good more comedy", 3)
+        self.assertIn("dec-last", response)
+        self.assertEqual(calls, [("dec-last", "good", "more comedy", "discord:3")])
 
     def test_queue_command_lists_actual_downloads_and_progress(self):
         queue = {"totalRecords": 1, "records": [{"title": "Movie.2020.1080p", "status": "downloading", "trackedDownloadState": "downloading", "size": 100, "sizeleft": 25, "timeleft": "00:10:00", "errorMessage": ""}]}
@@ -1141,7 +1149,10 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_PLEX_PROFILE_MAP",
             "CINESWARM_OFFSITE_VAULT_TARGET",
             "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE",
+            "CINESWARM_NEVER_IMPORTED_DAYS",
             "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+            "CINESWARM_MODEL_FALLBACKS",
+            "CINESWARM_MODEL_MAX_RETRIES",
             "CINESWARM_NOTIFICATION_COOLDOWN",
             "CINESWARM_HEARTBEAT_STALE_SECONDS",
             "CINESWARM_AUTONOMOUS_INTERVAL",
@@ -1297,6 +1308,31 @@ class HouseholdCatchupTests(unittest.TestCase):
                 switched = engine.apply_plex_account("Kids Tablet")
             self.assertEqual(switched["active_profile"], "kids")
             self.assertFalse(engine.allows_certification("R"))
+
+    def test_plex_account_infers_kids_without_explicit_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = MultiUserTasteEngine(os.path.join(directory, "control.db"))
+            with patch.dict("os.environ", {"CINESWARM_PLEX_PROFILE_MAP": ""}):
+                switched = engine.apply_plex_account("Kids Tablet")
+            self.assertEqual(switched["active_profile"], "kids")
+
+    def test_hosted_model_falls_back_after_hard_403(self):
+        client = HostedModelClient()
+        client.api_key = "test-key"
+        client.model = "gemini-2.5-flash"
+        client.provider = "gemini"
+        calls = []
+
+        def openai_complete(model, messages, temperature):
+            calls.append(model)
+            raise AgentError("Hosted model returned HTTP 403: project denied")
+
+        client._openai_complete = openai_complete
+        client._native_gemini_complete = lambda model, messages, temperature: f"native:{model}"
+        with patch.dict("os.environ", {"CINESWARM_MODEL_FALLBACKS": "gemini-2.0-flash", "CINESWARM_MODEL_MAX_RETRIES": "1"}):
+            text = client.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(text, "native:gemini-2.5-flash")
+        self.assertEqual(calls, ["gemini-2.5-flash"])
 
 
 if __name__ == "__main__":

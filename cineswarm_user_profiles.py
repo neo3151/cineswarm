@@ -133,8 +133,21 @@ class MultiUserTasteEngine:
             mapping[plex_name.strip().casefold()] = profile_id.strip().lower()
         profile_id = mapping.get(str(account_name or "").strip().casefold())
         if not profile_id:
+            profile_id = self.infer_profile_id(account_name)
+        if not profile_id:
             return None
         return self.switch_active_profile(profile_id)
+
+    @staticmethod
+    def infer_profile_id(account_name: str | None) -> str | None:
+        name = str(account_name or "").casefold()
+        if any(token in name for token in ("kid", "child", "junior", "tablet")):
+            return "kids"
+        if "guest" in name:
+            return "guest"
+        if any(token in name for token in ("partner", "spouse", "wife", "husband")):
+            return "partner"
+        return None
 
     def allows_certification(self, certification: str | None, profile: dict[str, Any] | None = None) -> bool:
         profile = profile or self.get_active_profile()

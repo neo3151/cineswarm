@@ -103,41 +103,100 @@ class HostedModelClient:
     def configured(self) -> bool:
         return bool(self.api_key)
 
+    def _model_candidates(self) -> list[str]:
+        fallbacks = [item.strip() for item in os.environ.get("CINESWARM_MODEL_FALLBACKS", "gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if item.strip()]
+        models: list[str] = []
+        for name in [self.model, *fallbacks]:
+            if name and name not in models:
+                models.append(name)
+        return models or [self.model or "gemini-2.5-flash"]
+
+    def _openai_complete(self, model: str, messages: list[dict[str, Any]], temperature: float) -> str:
+        body = json.dumps({"model": model, "messages": messages, "temperature": temperature}).encode("utf-8")
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body_err = exc.read().decode("utf-8", errors="ignore")
+            raise AgentError(f"Hosted model returned HTTP {exc.code}: {body_err}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise AgentError(f"Hosted model request failed: {exc.__class__.__name__}") from exc
+        try:
+            return payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AgentError("Hosted model returned an invalid completion") from exc
+
+    def _native_gemini_complete(self, model: str, messages: list[dict[str, Any]], temperature: float) -> str:
+        contents = []
+        system_bits = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            text = str(message.get("content") or "")
+            if role == "system":
+                system_bits.append(text)
+                continue
+            contents.append({"role": "user" if role != "assistant" else "model", "parts": [{"text": text}]})
+        if not contents:
+            contents.append({"role": "user", "parts": [{"text": "\n".join(system_bits) or "OK"}]})
+        payload = {"contents": contents, "generationConfig": {"temperature": temperature}}
+        if system_bits:
+            payload["systemInstruction"] = {"parts": [{"text": "\n".join(system_bits)}]}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(model, safe='')}:generateContent?key={urllib.parse.quote(self.api_key)}"
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body_err = exc.read().decode("utf-8", errors="ignore")
+            raise AgentError(f"Hosted model returned HTTP {exc.code}: {body_err}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise AgentError(f"Hosted model request failed: {exc.__class__.__name__}") from exc
+        try:
+            return body["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise AgentError("Hosted model returned an invalid completion") from exc
+
     def complete(self, messages: list[dict[str, Any]], temperature: float = 0.2) -> str:
         if not self.configured:
             raise AgentError("Hosted model is not configured; set CINESWARM_MODEL_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY in .env")
-        body = json.dumps({"model": self.model, "messages": messages, "temperature": temperature}).encode("utf-8")
         max_attempts = max(1, int(os.environ.get("CINESWARM_MODEL_MAX_RETRIES", "3")))
         last_error: Exception | None = None
-        for attempt in range(1, max_attempts + 1):
-            request = urllib.request.Request(
-                self.base_url + "/chat/completions",
-                data=body,
-                method="POST",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+        for model in self._model_candidates():
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    return payload["choices"][0]["message"]["content"]
-                except (KeyError, IndexError, TypeError) as exc:
-                    raise AgentError("Hosted model returned an invalid completion") from exc
-            except urllib.error.HTTPError as exc:
-                body_err = exc.read().decode("utf-8", errors="ignore")
-                last_error = AgentError(f"Hosted model returned HTTP {exc.code}: {body_err}")
-                if exc.code not in {429, 500, 502, 503, 504} or attempt >= max_attempts:
-                    raise last_error from exc
-                time.sleep(min(30.0, 1.5 * (2 ** (attempt - 1))))
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                last_error = AgentError(f"Hosted model request failed: {exc.__class__.__name__}")
-                if attempt >= max_attempts:
-                    raise last_error from exc
-                time.sleep(min(30.0, 1.5 * (2 ** (attempt - 1))))
+                    return self._openai_complete(model, messages, temperature)
+                except AgentError as exc:
+                    last_error = exc
+                    text = str(exc)
+                    hard_deny = "HTTP 401" in text or "HTTP 403" in text or "HTTP 404" in text
+                    transient = "HTTP 429" in text or "HTTP 500" in text or "HTTP 502" in text or "HTTP 503" in text or "HTTP 504" in text or "request failed" in text
+                    if hard_deny:
+                        break
+                    if not transient or attempt >= max_attempts:
+                        break
+                    time.sleep(min(30.0, 1.5 * (2 ** (attempt - 1))))
+            if self.provider == "gemini":
+                try:
+                    return self._native_gemini_complete(model, messages, temperature)
+                except AgentError as exc:
+                    last_error = exc
+                    if "HTTP 401" in str(exc) or "HTTP 403" in str(exc) or "HTTP 404" in str(exc):
+                        continue
         raise last_error or AgentError("Hosted model request failed")
 
     def complete_with_tools(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], temperature: float = 0.2) -> dict[str, Any]:

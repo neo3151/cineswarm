@@ -420,6 +420,12 @@ def sync_offsite_vault(backup_dir: str | None = None, vault_target: str | None =
     if not os.path.isdir(backup_dir):
         return {"status": "skipped", "message": f"Backup directory {backup_dir} does not exist."}
 
+    if not vault_target.startswith(("s3://", "gs://")) and not os.path.isdir(vault_target):
+        try:
+            os.makedirs(vault_target, exist_ok=True)
+        except OSError as exc:
+            return {"status": "skipped", "vault_target": vault_target, "message": f"vault target missing: {exc}"}
+
     copied = []
     errors = []
     for entry in os.scandir(backup_dir):

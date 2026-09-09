@@ -304,7 +304,12 @@ class DiscordService:
         decisions = self.plane.store.decisions(10)
         if not decisions:
             return "No CineSwarm decisions have been recorded yet."
-        return "\n\n".join(f"`{item['decision_id']}`\n**{item['decision'].upper()}** — {item['category']} — {item['subject']}\n{item['created_at']}" for item in decisions)
+        lines = []
+        for item in decisions:
+            mark = (item.get("feedback") or {}).get("sentiment") or "none"
+            lines.append(f"`{item['decision_id']}`\n**{item['decision'].upper()}** — {item['category']} — {item['subject']}\nFeedback: {mark} · {item['created_at']}")
+        lines.append("Mark the latest with `!cine feedback last good` or `!cine feedback last bad`.")
+        return "\n\n".join(lines)
 
     def _decision_detail(self, decision_id: str) -> str:
         item = self.plane.store.decision(decision_id.strip())
@@ -338,6 +343,11 @@ class DiscordService:
             return "Usage: `!cine feedback DECISION_ID good|bad optional note`"
         decision_id, sentiment = parts[0], parts[1].casefold()
         note = parts[2] if len(parts) > 2 else ""
+        if decision_id.casefold() in {"last", "latest"}:
+            recent = self.plane.store.decisions(1)
+            if not recent:
+                return "No decisions are available to mark yet."
+            decision_id = recent[0]["decision_id"]
         if hasattr(self.plane, "record_decision_feedback"):
             saved = self.plane.record_decision_feedback(decision_id, sentiment, note, actor=actor)
         else:
@@ -351,7 +361,7 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `add Movie Title (Year)`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback last|ID good|bad NOTE`, `digest`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
         if lowered in ("monitor", "ops", "live_monitor"):

@@ -118,7 +118,7 @@ or mention the bot:
 | `!cine decision DECISION_ID` | Show reasons and outcome for one decision | No |
 | `!cine profile` | Show family profiles and the active rating ceiling | No |
 | `!cine profile admin|partner|kids|guest` | Switch the active family profile for discovery and Watch Tonight | Local profile only |
-| `!cine feedback DECISION_ID good|bad NOTE` | Record preference feedback for future discovery context | Local learning data |
+| `!cine feedback last|DECISION_ID good|bad NOTE` | Record preference feedback for future discovery context | Local learning data |
 | `!cine confirm TASK_ID` | Legacy/manual confirmation for tasks created outside full autopilot | Yes |
 | `!cine pair CODE` | Pair the initial server, channel, and user | Configuration |
 | `!cine move CODE` | Move the bot to another channel in the paired server | Configuration |
@@ -490,6 +490,7 @@ Every autopilot execute, skip, block, override, and failure receives a durable U
 Record whether a decision was useful:
 
 ```text
+!cine feedback last good
 !cine feedback DECISION_ID good Great recommendation
 !cine feedback DECISION_ID bad Wrong tone for my library
 ```
@@ -610,7 +611,7 @@ This webhook is independent of Discord chat alerts (`CINESWARM_DISCORD_WEBHOOK` 
 
 ### Offsite / second-copy vault
 
-Daily database maintenance copies `cineswarm-control-*.sqlite3` and `cineswarm-catalog-*.sqlite3` into `backups/`, then mirrors matching files to `CINESWARM_OFFSITE_VAULT_TARGET` (a second mount or a local `backups/vault` directory). Cloud `s3://` / `gs://` targets need the host `gcloud` CLI. This is a database copy only; media files are never moved.
+Daily database maintenance copies `cineswarm-control-*.sqlite3` and `cineswarm-catalog-*.sqlite3` into `backups/` on the boot disk, then mirrors matching files to `CINESWARM_OFFSITE_VAULT_TARGET`. The household default is `/mnt/pool/disk7/cineswarm-vault` so the SQLite copies survive an NVMe failure. Cloud `s3://` / `gs://` targets need the host `gcloud` CLI. This is a database copy only; media files are never moved.
 
 The Overview dashboard includes a Monitoring snapshot card with overall status, queue counts, last alert, and a link to `/api/monitoring/snapshot`.
 

@@ -288,10 +288,11 @@ class Worker:
         except Exception:
             return False
 
-    def _recover_never_imported(self) -> dict[str, Any]:
+    def _recover_never_imported(self, limit: int | None = None) -> dict[str, Any]:
         """Search a bounded number of recent Radarr movies that were added but never imported."""
         preferred = {"comedy", "animation", "action", "science fiction", "family"}
-        gaps = self.plane.never_imported_movies(added_since_days=14, limit=20)
+        lookback = max(14, min(self._policy_int("CINESWARM_NEVER_IMPORTED_DAYS", 180), 730))
+        gaps = self.plane.never_imported_movies(added_since_days=lookback, limit=40)
         candidates = list(gaps.get("recent") or [])
         candidates.sort(
             key=lambda item: (
@@ -301,7 +302,11 @@ class Worker:
             reverse=True,
         )
         recovered = []
-        max_recover = max(1, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 2), 5))
+        max_recover = max(0, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 2), 8))
+        if limit is not None:
+            max_recover = max(0, min(max_recover, int(limit)))
+        if max_recover == 0:
+            return {"count": int(gaps.get("count") or 0), "recovered": []}
         for item in candidates:
             service_id = item.get("service_id")
             if not service_id or not item.get("monitored"):
@@ -819,21 +824,26 @@ class Worker:
             if notify.lower() in ("1", "true", "yes", "on") and failed:
                 self._send_notification("failed_downloads", {"count": len(failed), "failed": failed[:5]}, "failed_downloads")
             never_imported: dict[str, Any] = {"count": 0, "recovered": []}
+            free_slots = max(0, int(pressure.get("limit") or 2) - int(pressure.get("active") or 0) - len(approval_tasks))
             if (
-                not approval_tasks
+                free_slots
+                and not approval_tasks
                 and not pressure.get("pressured")
                 and hasattr(self.plane, "never_imported_movies")
                 and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
             ):
-                never_imported = self._recover_never_imported()
+                never_imported = self._recover_never_imported(limit=free_slots)
                 approval_tasks.extend(never_imported.get("recovered") or [])
+                free_slots = max(0, free_slots - len(never_imported.get("recovered") or []))
             av1_upgrades = {"queued": []}
             if (
-                not pressure.get("pressured")
+                free_slots
+                and not pressure.get("pressured")
                 and hasattr(self.plane, "queue_av1_upgrade_searches")
                 and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
             ):
-                av1_upgrades = self.plane.queue_av1_upgrade_searches(self._policy_int("CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", 3), actor="worker")
+                av1_limit = min(free_slots, self._policy_int("CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", 3))
+                av1_upgrades = self.plane.queue_av1_upgrade_searches(av1_limit, actor="worker")
                 for item in av1_upgrades.get("queued") or []:
                     task_id = item.get("task_id")
                     if not task_id:

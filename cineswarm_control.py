@@ -55,7 +55,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_CONTROL_HOST", "CINESWARM_CONTROL_PORT",
     "CINESWARM_CONTROL_DB", "CINESWARM_CATALOG_DB",
     "CINESWARM_MODEL_BASE_URL", "CINESWARM_MODEL_API_KEY", "CINESWARM_MODEL_NAME",
-    "CINESWARM_MODEL_TIMEOUT", "CINESWARM_MODEL_PROVIDER",
+    "CINESWARM_MODEL_TIMEOUT", "CINESWARM_MODEL_PROVIDER", "CINESWARM_MODEL_FALLBACKS", "CINESWARM_MODEL_MAX_RETRIES",
     "GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_MODEL",
     "CINESWARM_PATH_MAP", "CINESWARM_OUTPUT_MD",
     "CINESWARM_API_TIMEOUT",
@@ -85,7 +85,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_PRESERVATION_SAMPLE_LIMIT", "CINESWARM_PRESERVATION_CHECKSUM_BYTES", "CINESWARM_PRESERVATION_CHECKSUM_MAX_SIZE",
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
     "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
-    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
 
@@ -1546,7 +1546,17 @@ class ControlPlane:
     def discovery_run(self, actor: str = "worker") -> dict[str, Any]:
         if not self.discovery:
             raise AgentError("Discovery engine is not configured")
-        result = self.discovery.run()
+        try:
+            result = self.discovery.run()
+        except Exception as exc:
+            rescored = 0
+            try:
+                rescored = int(self.discovery.rescore_open_candidates() or 0)
+            except Exception:
+                pass
+            result = {"status": "model_unavailable", "generated": 0, "inserted": 0, "rescored_candidates": rescored, "error": str(exc)[:300]}
+            self.store.audit(actor, "discovery_run", "collection", "read-only", "model_unavailable", result)
+            return result
         self.store.audit(actor, "discovery_run", "collection", "read-only", "complete", {"generated": result.get("generated"), "inserted": result.get("inserted")})
         return result
 
