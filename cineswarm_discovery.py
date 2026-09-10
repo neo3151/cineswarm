@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Collection-aware Gemini discovery queue with Radarr/Sonarr validation."""
+"""Collection-aware discovery queue with Radarr/Sonarr validation.
+
+Default path is watch-taste Radarr lookups. Gemini stays optional behind
+CINESWARM_MODEL_PROVIDER=gemini when a working key exists.
+"""
 
 from __future__ import annotations
 
@@ -50,6 +54,22 @@ CREATE INDEX IF NOT EXISTS idx_discovery_queue ON discovery_candidates(status, s
 def timestamp() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+BOXSET_TITLE_RE = re.compile(
+    r"\bdisc\s*\d|\bdisk\s*\d|\bbox[\s-]?set\b|\bcollection volume\b|\bvolume\s+\d+\s+disc\b|\bthe mike judge collection\b",
+    re.I,
+)
+
+
+def is_boxset_title(title: str | None) -> bool:
+    """True for disc/volume box-set listings that should not enter discovery or recovery."""
+    return bool(BOXSET_TITLE_RE.search(str(title or "")))
+
+
+def uses_taste_backend() -> bool:
+    backend = (os.environ.get("CINESWARM_DISCOVERY_BACKEND") or os.environ.get("CINESWARM_MODEL_PROVIDER") or "gemini").strip().lower()
+    return backend in {"taste", "local", "radarr", "catalog", "off", "none", "disabled"}
 
 
 def parse_json(text: str) -> list[dict[str, Any]]:
@@ -554,9 +574,10 @@ class DiscoveryEngine:
             return [row[0] for row in rows]
 
     def run(self, limit: int = 15) -> dict[str, Any]:
-        if not self.model.configured:
-            raise AgentError("Gemini is not configured for discovery")
         profile = self.taste_profile()
+        if uses_taste_backend() or not self.model.configured:
+            inserted = self.taste_lookup_fallback(profile, limit=limit)
+            return {"status": "taste_lookup", "generated": 0, "inserted": len(inserted), "candidates": inserted, "fallback_inserted": len(inserted)}
         already_suggested = self._existing_candidate_titles()
         watch_genres = [item[0] for item in (profile.get("top_genres") or [])[:6]]
         watch_decades = [item[0] for item in (profile.get("top_decades") or [])[:4]]
@@ -630,6 +651,8 @@ class DiscoveryEngine:
     def _ingest_match(self, match: dict[str, Any], media_type: str, profile: dict[str, Any], reason: str, existing: set[str], existing_titles: set[str], existing_editions: set[str]) -> dict[str, Any] | None:
         id_key = "tmdbId" if media_type == "movie" else "tvdbId"
         if not match.get(id_key):
+            return None
+        if is_boxset_title(match.get("title")):
             return None
         stable_id = self._stable_key(media_type, match)
         edition = self.tools._extract_edition(match) or self.tools._extract_quality(match)
@@ -715,6 +738,8 @@ class DiscoveryEngine:
             owned = self._stable_key(item["media_type"], external_ids) in existing or str(item.get("title", "")).strip().casefold() in existing_titles
             if owned and not item.get("edition"):
                 continue
+            if is_boxset_title(item.get("title")):
+                continue
             results.append(item)
             if len(results) >= limit:
                 break
@@ -743,8 +768,9 @@ class DiscoveryEngine:
 
     def discover_missing_franchise_items(self, limit: int = 10) -> dict[str, Any]:
         """Analyze existing collection for film/tv franchises and propose missing sequels/prequels."""
-        if not self.model.configured:
-            raise AgentError("Gemini model is not configured")
+        if uses_taste_backend() or not self.model.configured:
+            inserted = self.taste_lookup_fallback(limit=limit)
+            return {"status": "taste_lookup", "generated": 0, "inserted": len(inserted), "franchise_candidates": inserted}
         
         # Sample 30 existing titles from catalog to identify franchises
         with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
@@ -803,10 +829,22 @@ class DiscoveryEngine:
 
     def scan_filmography_gaps(self, person_name: str, role: str = "director", limit: int = 10) -> dict[str, Any]:
         """Scan filmography for a specific director or actor to find missing catalog titles."""
-        if not self.model.configured:
-            raise AgentError("Gemini model is not configured")
-
         existing_titles = self._existing_titles()
+        if uses_taste_backend() or not self.model.configured:
+            if not self.planner or not getattr(self.planner, "radarr", None):
+                return {"person": person_name, "role": role, "total_scanned": 0, "missing_count": 0, "candidates": [], "status": "taste_lookup"}
+            try:
+                matches = self.planner.radarr.get("api/v3/movie/lookup", {"term": person_name})
+            except Exception:
+                matches = []
+            missing = []
+            for item in matches:
+                if not isinstance(item, dict) or not item.get("title"):
+                    continue
+                title = str(item.get("title", "")).strip()
+                if title and title.casefold() not in existing_titles and not is_boxset_title(title):
+                    missing.append({"title": title, "year": item.get("year"), "media_type": "movie", "overview": item.get("overview") or ""})
+            return {"person": person_name, "role": role, "total_scanned": len(matches) if isinstance(matches, list) else 0, "missing_count": len(missing), "candidates": missing[:limit], "status": "taste_lookup"}
         prompt = {
             "role": "You are a filmography completeness specialist.",
             "instruction": f"List the top key works directed by or starring '{person_name}' (role: {role}). Return only JSON.",

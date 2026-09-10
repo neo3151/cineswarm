@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cineswarm_agents import AcquisitionPlanner, AgentError, HostedModelClient, PlaybackHistory, ReadOnlyTools
 from cineswarm_control import ControlPlane, ControlStore, Handler, LOCAL_ENV_KEYS, PlexConnector, Policy, ServiceError, service_error_message
-from cineswarm_discovery import DiscoveryEngine
+from cineswarm_discovery import DiscoveryEngine, is_boxset_title
 from cineswarm_discord import DiscordService
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups, sync_offsite_vault
@@ -480,6 +480,33 @@ class DiscoveryTests(unittest.TestCase):
                 inserted = engine.taste_lookup_fallback({"top_directors": [("Joel Coen", 4)], "recent_activity": [], "top_genres": []}, limit=3)
         self.assertEqual(inserted[0]["title"], "The Big Lebowski")
         self.assertGreater(inserted[0]["score"], 0)
+
+    def test_boxset_titles_are_skipped_and_theatrical_volumes_are_kept(self):
+        self.assertTrue(is_boxset_title("Beavis and Butt-Head: The Mike Judge Collection Volume 1 Disc 1"))
+        self.assertTrue(is_boxset_title("Some Show Box Set"))
+        self.assertFalse(is_boxset_title("Kill Bill: Volume 1"))
+        self.assertFalse(is_boxset_title("The Big Lebowski"))
+
+    def test_discovery_run_uses_taste_backend_without_gemini(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = f"{directory}/catalog.db"
+            control = f"{directory}/control.db"
+            with sqlite3.connect(catalog) as connection:
+                connection.execute("CREATE TABLE catalog_items (source_id TEXT, title TEXT, present INTEGER, raw_json TEXT)")
+            planner = SimpleNamespace(radarr=SimpleNamespace(get=lambda path, params=None: [{"title": "Fargo", "year": 1996, "tmdbId": 275, "genres": ["Crime"], "runtime": 98}]))
+            store = SimpleNamespace(snapshot_payload=lambda service: None)
+            with patch("cineswarm_discovery.CONTROL_DB", control), patch("cineswarm_discovery.CATALOG_DB", catalog), patch.dict("os.environ", {"CINESWARM_MODEL_PROVIDER": "taste", "CINESWARM_DISCOVERY_BACKEND": "taste", "GEMINI_API_KEY": "unused"}):
+                engine = DiscoveryEngine(store, planner, SimpleNamespace(_extract_edition=lambda item: None, _extract_quality=lambda item: None))
+                engine.taste_profile = lambda: {"top_directors": [("Joel Coen", 4)], "recent_activity": [], "top_genres": []}
+                engine.model.complete = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Gemini should stay offline"))
+                result = engine.run(limit=2)
+        self.assertEqual(result["status"], "taste_lookup")
+        self.assertGreaterEqual(result["inserted"], 1)
+        self.assertEqual(result["candidates"][0]["title"], "Fargo")
+
+    def test_hosted_model_taste_provider_is_not_configured(self):
+        with patch.dict("os.environ", {"CINESWARM_MODEL_PROVIDER": "taste", "GEMINI_API_KEY": "unused-key"}):
+            self.assertFalse(HostedModelClient().configured)
 
     def test_queue_filters_candidates_already_in_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1168,6 +1195,7 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
             "CINESWARM_MODEL_FALLBACKS",
             "CINESWARM_MODEL_MAX_RETRIES",
+            "CINESWARM_DISCOVERY_BACKEND",
             "CINESWARM_NOTIFICATION_COOLDOWN",
             "CINESWARM_HEARTBEAT_STALE_SECONDS",
             "CINESWARM_AUTONOMOUS_INTERVAL",

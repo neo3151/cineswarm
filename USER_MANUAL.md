@@ -1,6 +1,6 @@
 # CineSwarm User Manual
 
-> **Private media operations for Plex, Radarr, Sonarr, Gemini, and Discord**  
+> **Private media operations for Plex, Radarr, Sonarr, and Discord**  
 > Live catalog intelligence, controlled acquisition, exact-release upgrades, autonomous discovery, durable monitoring, and audit-first operations.
 
 ---
@@ -12,7 +12,7 @@
 | Plex | Playback library and watch-history source | Healthy |
 | Radarr | Movie management, search, grabs, and imports | Healthy |
 | Sonarr | Series management and queue visibility | Healthy |
-| Gemini | Recommendations, discovery, and conversational answers | Connected |
+| Gemini | Optional chat/discovery model | Paused (`CINESWARM_MODEL_PROVIDER=taste`) |
 | CineSwarm dashboard | LAN operations console | Active |
 | CineSwarm worker | Scheduled maintenance and autonomous movie acquisition | Active |
 | CineSwarm Discord bot | Private chat and approval interface | Active |
@@ -97,7 +97,7 @@ or mention the bot:
 | `!cine monitor` | Live ops digest from `/api/monitoring/snapshot` (queues, worker, top issues) | No |
 | `!cine queue` | List actual Radarr/Sonarr releases, states, progress, remaining size, time, and errors | No |
 | `!cine discover` | Show ranked missing candidates with acquisition IDs | No |
-| `!cine discover refresh` | Run Gemini discovery immediately and show verified results | Local queue only |
+| `!cine discover refresh` | Run watch-taste discovery immediately and show verified results | Local queue only |
 | `!cine acquire CANDIDATE_ID` | Immediately add and search a verified discovery candidate | Yes |
 | `!cine franchise` | Scan collection and discover missing franchise sequels/prequels | Local queue only |
 | `!cine recommendations` | Alias for discovery | No |
@@ -279,7 +279,7 @@ CineSwarm returns up to ten missing candidates with a durable candidate ID, rele
 !cine discover refresh
 ```
 
-This runs Gemini discovery now, validates every suggestion through Radarr/Sonarr, discards existing titles, stores verified candidates, and returns the refreshed queue.
+This runs watch-taste discovery now (Radarr lookups of watched directors, titles, and genres), discards existing titles and box-set discs, stores verified candidates, and returns the refreshed queue. Gemini is skipped while `CINESWARM_MODEL_PROVIDER=taste`.
 
 ### Acquire a discovery candidate
 
@@ -299,11 +299,11 @@ The daily discovery pass:
 
 1. Builds a taste profile from Plex playback history.
 2. Adds catalog genre and era patterns.
-3. Requests distinctive candidates from Gemini.
+3. Looks up related titles in Radarr from watched directors, recent titles, and genres.
 4. Validates each title through Radarr or Sonarr lookup.
 5. Requires exact normalized title and year matching.
 6. Rejects titles already in Plex or the Radarr/Sonarr catalog.
-7. Rejects provider-ID duplicates.
+7. Rejects provider-ID duplicates and box-set/disc listings.
 8. Scores the remaining candidates.
 9. Stores them in the durable discovery queue.
 
@@ -532,7 +532,7 @@ Register the Plex playback webhook as the LAN dashboard URL (`http://192.168.1.2
 | Playback profile | Show Plex-derived viewing preferences |
 | Request Plex scan | Create a pending Plex refresh task |
 | Approve pending action | Execute the selected pending task |
-| Find new candidates | Run Gemini discovery immediately |
+| Find new candidates | Run watch-taste discovery immediately |
 | Plan an acquisition | Perform a read-only Radarr/Sonarr lookup |
 | Emergency stop | Enable or disable autonomous acquisition |
 
@@ -785,7 +785,7 @@ cd /home/neo/workspace/cineswarm
 .venv/bin/python -m unittest -v
 ```
 
-The current suite contains **95 tests** covering catalog identifiers, Plex parsing, discovery scoring, family profiles, Plex webhook ingest, offsite backup copy, acquisition safety, dashboard auth, worker budgets, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
+The current suite contains **103 tests** covering catalog identifiers, Plex parsing, discovery scoring, family profiles, Plex webhook ingest, offsite backup copy, acquisition safety, dashboard auth, worker budgets, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
 
 ### View recent logs
 
@@ -987,7 +987,7 @@ CineSwarm does not:
 |---|---|
 | `cineswarm_control.py` | Dashboard, policy, tasks, approvals, service connectors |
 | `cineswarm_agents.py` | Chat tools, reconciliation, acquisition planner |
-| `cineswarm_discovery.py` | Gemini discovery, deduplication, scoring |
+| `cineswarm_discovery.py` | Watch-taste discovery, deduplication, scoring |
 | `cineswarm_worker.py` | Durable schedules, autonomy, monitoring, Discord alerts |
 | `cineswarm_discord.py` | Private Discord Gateway bot |
 | `cineswarm_sync.py` | Radarr/Sonarr database catalog synchronization |

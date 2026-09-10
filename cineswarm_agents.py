@@ -101,6 +101,8 @@ class HostedModelClient:
 
     @property
     def configured(self) -> bool:
+        if self.provider in {"off", "none", "disabled", "taste", "local", "radarr", "catalog"}:
+            return False
         return bool(self.api_key)
 
     def _model_candidates(self) -> list[str]:

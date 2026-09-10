@@ -16,6 +16,7 @@ from typing import Any
 import urllib.request
 
 from cineswarm_control import CATALOG_DB, ControlStore, json_text, make_plane, redact
+from cineswarm_discovery import is_boxset_title
 from cineswarm_preservation import configured_branches, csv_paths, database_maintenance, preservation_scan
 from cineswarm_sync import sync_catalog
 
@@ -308,6 +309,8 @@ class Worker:
         if max_recover == 0:
             return {"count": int(gaps.get("count") or 0), "recovered": []}
         for item in candidates:
+            if is_boxset_title(item.get("title")):
+                continue
             service_id = item.get("service_id")
             if not service_id or not item.get("monitored"):
                 continue
@@ -633,7 +636,7 @@ class Worker:
             recent_cutoff = datetime.now(timezone.utc).year - recent_years
             queue.sort(key=lambda candidate: ((candidate.get("year", 0) >= recent_cutoff) != desired_recent, -candidate.get("score", 0)))
             managed_movies = self.plane.planner.radarr.get("api/v3/movie")
-            skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0}
+            skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0, "boxset": 0}
             near_misses: list[dict[str, Any]] = []
 
             def _execute_candidate(candidate: dict[str, Any], candidate_detail: dict[str, Any], decision_name: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -691,6 +694,13 @@ class Worker:
             for candidate in queue:
                 if candidate["media_type"] != "movie" or candidate["status"] not in ("new", "approved"):
                     skip_counts["non_movie_or_status"] += 1
+                    continue
+                if is_boxset_title(candidate.get("title")):
+                    skip_counts["boxset"] += 1
+                    try:
+                        self.plane.discovery.set_status(candidate["id"], "rejected")
+                    except Exception:
+                        pass
                     continue
                 if candidate["score"] < min_score:
                     skip_counts["low_score"] += 1
