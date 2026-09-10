@@ -785,7 +785,7 @@ cd /home/neo/workspace/cineswarm
 .venv/bin/python -m unittest -v
 ```
 
-The current suite contains **103 tests** covering catalog identifiers, Plex parsing, discovery scoring, family profiles, Plex webhook ingest, offsite backup copy, acquisition safety, dashboard auth, worker budgets, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
+The current suite contains **104 tests** covering catalog identifiers, Plex parsing, discovery scoring, family profiles, Plex webhook ingest, offsite backup copy, acquisition safety, dashboard auth, worker budgets, Discord authorization, pairing, channel migration, alerts, heartbeat, and watchdog-related behavior.
 
 ### View recent logs
 

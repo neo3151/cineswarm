@@ -1373,6 +1373,23 @@ class ControlStore:
         result["payload"] = json.loads(result.pop("payload_json") or "{}")
         return result
 
+    def pending_tasks(self, task_type: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT task_id, task_type, payload_json, created_at FROM tasks WHERE status='pending_approval'"
+        params: list[Any] = []
+        if task_type:
+            query += " AND task_type=?"
+            params.append(task_type)
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(max(1, min(int(limit), 200)))
+        with self.lock, self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json") or "{}")
+            results.append(item)
+        return results
+
     def update_task(self, task_id: str, status: str, result: Any = None) -> None:
         with self.lock, self._connect() as connection:
             if result is None:
@@ -1530,6 +1547,11 @@ class ControlPlane:
             state = observation.get("state", "unknown")
             summary[state] = summary.get(state, 0) + 1
         followups = []
+        full_autopilot = False
+        get_policy = getattr(self.store, "get_policy", None)
+        if callable(get_policy):
+            full_autopilot = str(get_policy("CINESWARM_FULL_AUTOPILOT") or "").lower() in {"1", "true", "yes", "on"}
+        plex_refresh_ran = False
         for observation in observations:
             parent_task_id = observation["task_id"]
             if observation.get("state") == "search_completed_no_file":
@@ -1538,6 +1560,16 @@ class ControlPlane:
                     followup_id = self.store.create_task(retry_type, actor, {"media_type": observation.get("media_type"), "service_id": observation.get("service_id"), "parent_task_id": parent_task_id, "reason": "The approved search completed without an imported file. Review and retry once if desired."})
                     followups.append({"task_id": followup_id, "parent_task_id": parent_task_id, "state": "pending_approval"})
             elif observation.get("state") == "imported":
+                if full_autopilot:
+                    if plex_refresh_ran:
+                        continue
+                    try:
+                        result = self.execute_automatic("plex_library_refresh", actor, {"reason": "import_followup", "parent_task_id": parent_task_id})
+                        followups.append({"parent_task_id": parent_task_id, "state": "imported", "status": result.get("status") or "executed"})
+                    except Exception as exc:
+                        followups.append({"parent_task_id": parent_task_id, "state": "imported", "status": "failed", "error": str(exc)})
+                    plex_refresh_ran = True
+                    continue
                 if not self.store.task_exists("plex_library_refresh", parent_task_id):
                     followup_id = self.store.create_task("plex_library_refresh", actor, {"parent_task_id": parent_task_id, "reason": "The acquisition imported successfully. Review and approve a Plex refresh."})
                     followups.append({"task_id": followup_id, "parent_task_id": parent_task_id, "state": "pending_approval"})

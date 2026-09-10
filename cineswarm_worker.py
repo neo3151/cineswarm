@@ -231,6 +231,43 @@ class Worker:
     def _policy_int(self, key: str, default: int) -> int:
         return int(self._policy(key, str(default)))
 
+    @staticmethod
+    def genres_blocked(genres: set[str], allowed: set[str], forbidden: set[str], soft_forbidden: set[str] | None = None) -> bool:
+        """Block hard-forbidden genres; Music only blocks when no allowed genre is also present."""
+        names = {str(genre).strip().lower() for genre in genres if genre}
+        allowed_names = {str(genre).strip().lower() for genre in allowed if genre}
+        forbidden_names = {str(genre).strip().lower() for genre in forbidden if genre}
+        soft = {str(genre).strip().lower() for genre in (soft_forbidden or {"music"}) if genre}
+        hard = forbidden_names - soft
+        if names & hard:
+            return True
+        if allowed_names and not (names & allowed_names):
+            return True
+        if (names & forbidden_names & soft) and not (names & allowed_names):
+            return True
+        return False
+
+    @staticmethod
+    def runtime_minutes(raw: dict[str, Any] | None) -> float:
+        value = (raw or {}).get("runtime") or (raw or {}).get("runtime_minutes") or 0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _movie_title(self, service_id: Any) -> str:
+        if service_id in (None, ""):
+            return ""
+        try:
+            with sqlite3.connect(f"file:{CATALOG_DB}?mode=ro", uri=True) as connection:
+                row = connection.execute(
+                    "SELECT title FROM catalog_items WHERE media_type='movie' AND source_native_id=? LIMIT 1",
+                    (int(service_id),),
+                ).fetchone()
+            return str(row[0] or "") if row else ""
+        except Exception:
+            return ""
+
     def _emergency_stop(self) -> bool:
         stored = self.control_store.is_emergency_stop() if hasattr(self.control_store, "is_emergency_stop") else False
         return self._policy_bool("CINESWARM_AUTO_EMERGENCY_STOP") or stored
@@ -636,7 +673,7 @@ class Worker:
             recent_cutoff = datetime.now(timezone.utc).year - recent_years
             queue.sort(key=lambda candidate: ((candidate.get("year", 0) >= recent_cutoff) != desired_recent, -candidate.get("score", 0)))
             managed_movies = self.plane.planner.radarr.get("api/v3/movie")
-            skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0, "boxset": 0}
+            skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0, "boxset": 0, "short_runtime": 0}
             near_misses: list[dict[str, Any]] = []
 
             def _execute_candidate(candidate: dict[str, Any], candidate_detail: dict[str, Any], decision_name: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -720,8 +757,13 @@ class Worker:
                     if len(near_misses) < 8:
                         near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "owned_or_missing_detail"})
                     continue
-                genres = {genre.lower() for genre in candidate_detail.get("candidate", {}).get("genres", [])}
-                if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
+                raw = candidate_detail.get("candidate") or {}
+                runtime_val = self.runtime_minutes(raw)
+                if 0 < runtime_val < 70:
+                    skip_counts["short_runtime"] += 1
+                    continue
+                genres = {str(genre).lower() for genre in (raw.get("genres") or [])}
+                if self.genres_blocked(genres, allowed_genres, forbidden_genres):
                     skip_counts["forbidden_genre"] += 1
                     if len(near_misses) < 8:
                         near_misses.append({"id": candidate.get("id"), "title": candidate.get("title"), "year": candidate.get("year"), "score": candidate.get("score"), "reason": "forbidden_genre", "genres": sorted(genres & forbidden_genres) if forbidden_genres else sorted(genres)})
@@ -745,13 +787,9 @@ class Worker:
                         continue
                     raw = candidate_detail.get("candidate") or {}
                     genres = {str(genre).lower() for genre in (raw.get("genres") or [])}
-                    if forbidden_genres & genres or (allowed_genres and not (allowed_genres & genres)):
+                    if self.genres_blocked(genres, allowed_genres, forbidden_genres):
                         continue
-                    runtime = raw.get("runtime") or raw.get("runtime_minutes") or 0
-                    try:
-                        runtime_val = float(runtime)
-                    except (TypeError, ValueError):
-                        runtime_val = 0.0
+                    runtime_val = self.runtime_minutes(raw)
                     theatrical_ok = runtime_val >= 70 and not (raw.get("seriesType") or raw.get("seasons"))
                     affinity = float(candidate.get("watch_affinity_score") or candidate_detail.get("watch_affinity_score") or 0)
                     if not theatrical_ok or affinity < affinity_floor:
@@ -834,10 +872,39 @@ class Worker:
             if notify.lower() in ("1", "true", "yes", "on") and failed:
                 self._send_notification("failed_downloads", {"count": len(failed), "failed": failed[:5]}, "failed_downloads")
             never_imported: dict[str, Any] = {"count": 0, "recovered": []}
+            pending_retries: list[dict[str, Any]] = []
             free_slots = max(0, int(pressure.get("limit") or 2) - int(pressure.get("active") or 0) - len(approval_tasks))
             if (
                 free_slots
-                and not approval_tasks
+                and not pressure.get("pressured")
+                and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
+                and hasattr(self.control_store, "pending_tasks")
+            ):
+                seen_ids: set[str] = set()
+                for task in self.control_store.pending_tasks("radarr_search_retry_request", limit=30):
+                    if free_slots <= 0:
+                        break
+                    payload = task.get("payload") or {}
+                    service_id = payload.get("service_id")
+                    title = self._movie_title(service_id)
+                    if is_boxset_title(title):
+                        self.control_store.update_task(task["task_id"], "completed", {"status": "skipped_boxset", "title": title})
+                        continue
+                    if service_id in (None, "") or str(service_id) in seen_ids:
+                        self.control_store.update_task(task["task_id"], "completed", {"status": "skipped_duplicate", "service_id": service_id})
+                        continue
+                    seen_ids.add(str(service_id))
+                    task_result = {"task_id": task["task_id"], "task_type": task["task_type"], "service_id": service_id, "title": title, "status": "pending_approval"}
+                    try:
+                        result = self.plane.approve_task(task["task_id"], "autonomous-recovery")
+                        task_result.update({"status": "executed", "result": result.get("result") or {}})
+                        free_slots -= 1
+                    except Exception as exc:
+                        task_result.update({"status": "failed", "error": str(exc)})
+                    pending_retries.append(task_result)
+                    approval_tasks.append(task_result)
+            if (
+                free_slots
                 and not pressure.get("pressured")
                 and hasattr(self.plane, "never_imported_movies")
                 and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
@@ -865,7 +932,7 @@ class Worker:
                         item["status"] = "failed"
                         item["error"] = str(exc)
                     approval_tasks.append(item)
-            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}, "never_imported": never_imported, "av1_upgrades": av1_upgrades}
+            return {"status": "completed", "failed_count": len(failed), "approval_tasks_created": len(approval_tasks), "tasks": approval_tasks, "pressure": pressure, "limits": {"per_cycle": max_per_cycle, "per_media": max_per_media, "cooldown": cooldown}, "never_imported": never_imported, "pending_retries": pending_retries, "av1_upgrades": av1_upgrades}
         if job_type == "media_health_scan":
             scan_res = self.plane.scan_media_health(limit=50, actor="worker", allow_automatic=getattr(self, "_startup_ready", True))
             if scan_res.get("corrupt_count", 0) > 0:

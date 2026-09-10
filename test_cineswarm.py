@@ -508,6 +508,15 @@ class DiscoveryTests(unittest.TestCase):
         with patch.dict("os.environ", {"CINESWARM_MODEL_PROVIDER": "taste", "GEMINI_API_KEY": "unused-key"}):
             self.assertFalse(HostedModelClient().configured)
 
+    def test_music_tag_does_not_block_comedy_titles(self):
+        allowed = {"comedy", "animation"}
+        forbidden = {"music", "documentary", "western"}
+        self.assertFalse(Worker.genres_blocked({"comedy", "music"}, allowed, forbidden))
+        self.assertTrue(Worker.genres_blocked({"music"}, allowed, forbidden))
+        self.assertTrue(Worker.genres_blocked({"western", "comedy"}, allowed, forbidden))
+        self.assertEqual(Worker.runtime_minutes({"runtime": 88}), 88.0)
+        self.assertEqual(Worker.runtime_minutes({"runtime": 30}) < 70, True)
+
     def test_queue_filters_candidates_already_in_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
             catalog = f"{directory}/catalog.db"
