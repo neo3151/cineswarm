@@ -905,6 +905,59 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["status"], "executed_add_search")
         self.assertEqual(result["service_id"], 42)
         self.assertEqual(result["command_id"], 99)
+        self.assertEqual(result["acquired"], 1)
+
+    def test_autonomous_job_fills_free_download_slots(self):
+        worker = Worker.__new__(Worker)
+        worker._check_storage = lambda: {"alerts": []}
+        worker._record_autopilot_decision = lambda decision, details: {"status": decision, **details}
+        policies = {
+            "CINESWARM_AUTO_ADD_SEARCH": "true",
+            "CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS": "2",
+            "CINESWARM_AUTO_MIN_SCORE": "70",
+            "CINESWARM_AUTO_ALLOWED_GENRES": "Action,Comedy",
+            "CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE": "HD-1080p",
+            "CINESWARM_AUTO_RECENT_YEARS": "2",
+            "CINESWARM_AUTO_RECENT_WEEKLY_TARGET": "0",
+        }
+        titles = []
+        discovery = SimpleNamespace(
+            candidate=lambda candidate_id: {"candidate": {"title": f"Movie {candidate_id}", "year": 2024, "tmdbId": candidate_id, "genres": ["Comedy"], "runtime": 95}},
+            set_status=lambda *args: None,
+        )
+        planner = SimpleNamespace(
+            queue=lambda media_type: {"total_records": 0},
+            plan=lambda media_type, title: {"root_folders": [{"path": "/movies"}], "quality_profiles": [{"id": 1, "name": "HD-1080p"}]},
+            radarr=SimpleNamespace(get=lambda path: []),
+        )
+        store = SimpleNamespace(
+            is_emergency_stop=lambda: False,
+            get_policy=lambda key: policies.get(key),
+            check_budget=lambda: (True, {"budget": {"movies_added": 0, "series_added": 0, "gb_added": 0}, "limits": {"gb": 200}}),
+            record_autonomous_action=lambda *args: "action",
+            create_task=lambda *args: "add-task",
+            increment_budget=lambda *args: None,
+            complete_autonomous_action=lambda action_id: None,
+            fail_autonomous_action=lambda action_id: None,
+            get_week_start=lambda: "2026-09-10",
+        )
+        plane = SimpleNamespace(
+            planner=planner,
+            discovery=discovery,
+            discovery_queue=lambda: [
+                {"id": 11, "media_type": "movie", "title": "Movie 11", "year": 2024, "score": 80, "status": "new"},
+                {"id": 12, "media_type": "movie", "title": "Movie 12", "year": 2023, "score": 79, "status": "new"},
+                {"id": 13, "media_type": "movie", "title": "Movie 13", "year": 2022, "score": 78, "status": "new"},
+            ],
+            approve_task=lambda task_id, actor: titles.append(task_id) or {"result": {"id": 50 + len(titles)}, "follow_up": {"task_id": "search-task"}},
+        )
+        worker.control_store = store
+        worker.plane = plane
+        worker._send_notification = lambda *args, **kwargs: True
+        with patch("cineswarm_worker.sync_catalog"):
+            result = worker.execute({"job_type": "autonomous_acquisition"})
+        self.assertEqual(result["acquired"], 2)
+        self.assertEqual(len(result["acquisitions"]), 2)
 
     def test_reconcile_job_is_reachable(self):
         worker = Worker.__new__(Worker)
@@ -1201,6 +1254,9 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_OFFSITE_VAULT_TARGET",
             "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE",
             "CINESWARM_NEVER_IMPORTED_DAYS",
+            "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN",
+            "CINESWARM_AUTO_ACQUIRE_PER_CYCLE",
+            "CINESWARM_AUTO_NEAR_MISS_COOLDOWN",
             "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
             "CINESWARM_MODEL_FALLBACKS",
             "CINESWARM_MODEL_MAX_RETRIES",

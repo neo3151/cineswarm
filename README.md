@@ -89,7 +89,7 @@ The discovery engine runs a daily Gemini-powered candidate pass, validates each 
 
 ## Autonomous Movie Policy
 
-When `CINESWARM_FULL_AUTOPILOT=true`, paired-user adds, discovery acquisitions, searches, and exact grabs execute without confirmation after live revalidation. Background discovery remains gated by score **70**, `HD-1080p`, allowed genres, duplicate checks, 500 GB free, and fewer than two concurrent downloads. Near-miss titles scoring ≥68 may promote once per hour when theatrical runtime and watch-affinity gates pass. Growth uses `queue_only` budget mode with no weekly cap; historical counts and estimated 20 GB-per-movie usage remain recorded for reference. Emergency stop always takes precedence.
+When `CINESWARM_FULL_AUTOPILOT=true`, paired-user adds, discovery acquisitions, searches, and exact grabs execute without confirmation after live revalidation. Background discovery remains gated by score **65**, `HD-1080p`, allowed genres, duplicate checks, 500 GB free, and up to four concurrent downloads. Each cycle fills free slots; near-miss titles scoring ≥60 may promote when theatrical runtime and watch-affinity gates pass. Growth uses `queue_only` budget mode with no weekly cap; historical counts and estimated 20 GB-per-movie usage remain recorded for reference. Emergency stop always takes precedence.
 
 Automatic actions remain visible in `tasks`, `autonomous_actions`, `weekly_budget_tracker`, and `audit_events`. Adds and searches are separate revalidated operations. A successful add increments the weekly movie budget immediately; failed actions are recorded and do not loop silently.
 
@@ -109,7 +109,7 @@ Run continuously in the foreground:
 python3 cineswarm_worker.py
 ```
 
-The default schedules are service refresh every 15 minutes, catalog sync and failed-download inspection every 30 minutes, queue monitoring every 5 minutes, reconciliation and autonomous proposal evaluation every hour, and discovery refresh daily. Override them with `CINESWARM_REFRESH_INTERVAL`, `CINESWARM_CATALOG_INTERVAL`, `CINESWARM_FAILED_DOWNLOAD_INTERVAL`, `CINESWARM_QUEUE_INTERVAL`, `CINESWARM_RECONCILE_INTERVAL`, `CINESWARM_AUTONOMOUS_INTERVAL`, and `CINESWARM_DISCOVERY_INTERVAL`. Retry behavior is controlled by `CINESWARM_WORKER_MAX_ATTEMPTS`, `CINESWARM_WORKER_LEASE_SECONDS`, and `CINESWARM_WORKER_POLL_SECONDS`.
+The default schedules are service refresh every 15 minutes, catalog sync every 30 minutes, failed-download recovery and autonomous acquire every 15 minutes, queue monitoring every 5 minutes, reconciliation and discovery refresh every hour. Override them with `CINESWARM_REFRESH_INTERVAL`, `CINESWARM_CATALOG_INTERVAL`, `CINESWARM_FAILED_DOWNLOAD_INTERVAL`, `CINESWARM_QUEUE_INTERVAL`, `CINESWARM_RECONCILE_INTERVAL`, `CINESWARM_AUTONOMOUS_INTERVAL`, and `CINESWARM_DISCOVERY_INTERVAL`. Retry behavior is controlled by `CINESWARM_WORKER_MAX_ATTEMPTS`, `CINESWARM_WORKER_LEASE_SECONDS`, and `CINESWARM_WORKER_POLL_SECONDS`. Autopilot fills free download slots each cycle (default 4 concurrent) and can re-search never-imported titles after a 6-hour cooldown.
 
 Failed-download inspection never changes a quality profile. Under full autopilot it creates, revalidates, and executes at most one search retry for each failed queue item, records the decision and outcome, and never loops silently. Set `CINESWARM_NOTIFY_ON_FAILED_DOWNLOAD=true` to emit failure notifications. Stored policy takes precedence over environment defaults.
 

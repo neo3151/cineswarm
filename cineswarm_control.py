@@ -63,6 +63,8 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_AUTO_PLEX_REFRESH", "CINESWARM_PLEX_REFRESH_COOLDOWN",
     "CINESWARM_AUTO_MAX_MOVIES_PER_WEEK", "CINESWARM_AUTO_MAX_SERIES_PER_WEEK",
     "CINESWARM_AUTO_MAX_GB_PER_WEEK", "CINESWARM_AUTO_MIN_SCORE",
+    "CINESWARM_AUTO_NEAR_MISS_FLOOR", "CINESWARM_AUTO_NEAR_MISS_AFFINITY_FLOOR", "CINESWARM_AUTO_NEAR_MISS_COOLDOWN",
+    "CINESWARM_AUTO_ACQUIRE_PER_CYCLE",
     "CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE", "CINESWARM_AUTO_ALLOWED_GENRES",
     "CINESWARM_AUTO_FORBIDDEN_GENRES", "CINESWARM_AUTO_MIN_FREE_SPACE_GB",
     "CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "CINESWARM_AUTO_RETRY_FAILED_ONCE",
@@ -86,7 +88,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_PRESERVATION_SAMPLE_LIMIT", "CINESWARM_PRESERVATION_CHECKSUM_BYTES", "CINESWARM_PRESERVATION_CHECKSUM_MAX_SIZE",
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
     "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
-    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
 
@@ -1351,6 +1353,14 @@ class ControlStore:
             ).fetchone()
         return row is not None
 
+    def task_inflight(self, task_type: str, parent_task_id: str) -> bool:
+        with self.lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM tasks WHERE task_type=? AND payload_json LIKE ? AND status IN ('pending_approval','queued','running') LIMIT 1",
+                (task_type, f"%{parent_task_id}%"),
+            ).fetchone()
+        return row is not None
+
     def retry_cooldown_active(self, task_type: str, media_type: str, service_id: Any, cooldown: int) -> bool:
         cutoff = datetime.fromtimestamp(time.time() - max(0, cooldown), timezone.utc).isoformat(timespec="seconds")
         with self.lock, self._connect() as connection:
@@ -1580,7 +1590,7 @@ class ControlPlane:
         if not self.discovery:
             raise AgentError("Discovery engine is not configured")
         try:
-            result = self.discovery.run()
+            result = self.discovery.run(limit=20)
         except Exception as exc:
             rescored = 0
             fallback: list[dict[str, Any]] = []
@@ -2579,7 +2589,7 @@ class ControlPlane:
             overall = "degraded"
         downloads = {"movies": 0, "series": 0, "total": 0}
         download_errors: dict[str, str] = {}
-        queue_limit = max(1, int(os.environ.get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "2") or 2))
+        queue_limit = max(1, int(os.environ.get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "4") or 4))
         queue_pressure: dict[str, Any] = {
             "status": "unavailable",
             "pressured": False,

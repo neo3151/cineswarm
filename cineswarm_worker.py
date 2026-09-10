@@ -101,6 +101,10 @@ class WorkerStore:
                     "INSERT OR IGNORE INTO worker_schedules (job_type, interval_seconds, next_run_at) VALUES (?, ?, ?)",
                     (job_type, interval, timestamp),
                 )
+                connection.execute(
+                    "UPDATE worker_schedules SET interval_seconds=? WHERE job_type=?",
+                    (interval, job_type),
+                )
 
     def enqueue_due_schedules(self) -> int:
         timestamp = utc_epoch()
@@ -212,10 +216,10 @@ class Worker:
             "catalog_sync": int(os.environ.get("CINESWARM_CATALOG_INTERVAL", "1800")),
             "reconcile_library": int(os.environ.get("CINESWARM_RECONCILE_INTERVAL", "3600")),
             "queue_monitor": int(os.environ.get("CINESWARM_QUEUE_INTERVAL", "300")),
-            "discovery_refresh": int(os.environ.get("CINESWARM_DISCOVERY_INTERVAL", "86400")),
+            "discovery_refresh": int(os.environ.get("CINESWARM_DISCOVERY_INTERVAL", "3600")),
             "franchise_refresh": int(os.environ.get("CINESWARM_FRANCHISE_INTERVAL", "14400")),
-            "autonomous_acquisition": int(os.environ.get("CINESWARM_AUTONOMOUS_INTERVAL", "3600")),
-            "failed_download_recovery": int(os.environ.get("CINESWARM_FAILED_DOWNLOAD_INTERVAL", "1800")),
+            "autonomous_acquisition": int(os.environ.get("CINESWARM_AUTONOMOUS_INTERVAL", "900")),
+            "failed_download_recovery": int(os.environ.get("CINESWARM_FAILED_DOWNLOAD_INTERVAL", "900")),
             "media_health_scan": int(os.environ.get("CINESWARM_HEALTH_SCAN_INTERVAL", "43200")),
             "preservation_scan": int(os.environ.get("CINESWARM_PRESERVATION_INTERVAL", "604800")),
             "database_maintenance": int(os.environ.get("CINESWARM_DATABASE_MAINTENANCE_INTERVAL", "86400")),
@@ -273,7 +277,7 @@ class Worker:
         return self._policy_bool("CINESWARM_AUTO_EMERGENCY_STOP") or stored
 
     def _queue_pressure(self) -> dict[str, Any]:
-        limit = self._policy_int("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", 2)
+        limit = self._policy_int("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", 4)
         if hasattr(self.plane.planner, "global_queue_pressure"):
             return self.plane.planner.global_queue_pressure(limit)
         queues = [self.plane.planner.queue(media_type) for media_type in ("movie", "series")]
@@ -310,8 +314,10 @@ class Worker:
         self._send_notification("autopilot_decision", result, f"autopilot_decision:{decision_id}", force=True)
         return result
 
-    def _near_miss_promote_recent(self, within_seconds: int = 3600) -> bool:
-        """True if an audited near-miss promote already ran in the last hour."""
+    def _near_miss_promote_recent(self, within_seconds: int | None = None) -> bool:
+        """True if a near-miss promote already ran inside the cooldown window."""
+        if within_seconds is None:
+            within_seconds = self._policy_int("CINESWARM_AUTO_NEAR_MISS_COOLDOWN", 900)
         try:
             with sqlite3.connect(f"file:{CONTROL_DB}?mode=ro", uri=True) as connection:
                 row = connection.execute(
@@ -330,7 +336,7 @@ class Worker:
         """Search a bounded number of recent Radarr movies that were added but never imported."""
         preferred = {"comedy", "animation", "action", "science fiction", "family"}
         lookback = max(14, min(self._policy_int("CINESWARM_NEVER_IMPORTED_DAYS", 180), 730))
-        gaps = self.plane.never_imported_movies(added_since_days=lookback, limit=40)
+        gaps = self.plane.never_imported_movies(added_since_days=lookback, limit=80)
         candidates = list(gaps.get("recent") or [])
         candidates.sort(
             key=lambda item: (
@@ -340,11 +346,12 @@ class Worker:
             reverse=True,
         )
         recovered = []
-        max_recover = max(0, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 2), 8))
+        max_recover = max(0, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 4), 8))
         if limit is not None:
             max_recover = max(0, min(max_recover, int(limit)))
         if max_recover == 0:
             return {"count": int(gaps.get("count") or 0), "recovered": []}
+        search_cooldown = max(0, self._policy_int("CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN", 21600))
         for item in candidates:
             if is_boxset_title(item.get("title")):
                 continue
@@ -352,7 +359,12 @@ class Worker:
             if not service_id or not item.get("monitored"):
                 continue
             parent_task_id = f"never-imported:{service_id}"
-            if self.control_store.task_exists("radarr_search_request", parent_task_id):
+            inflight = getattr(self.control_store, "task_inflight", None)
+            if callable(inflight) and inflight("radarr_search_request", parent_task_id):
+                continue
+            if not callable(inflight) and self.control_store.task_exists("radarr_search_request", parent_task_id):
+                continue
+            if hasattr(self.control_store, "retry_cooldown_active") and self.control_store.retry_cooldown_active("radarr_search_request", "movie", service_id, search_cooldown):
                 continue
             payload = {
                 "media_type": "movie",
@@ -661,9 +673,11 @@ class Worker:
             if not self.plane.discovery:
                 return self._record_autopilot_decision("blocked_discovery_unavailable", {})
             queue = self.plane.discovery_queue()
-            min_score = self._policy_int("CINESWARM_AUTO_MIN_SCORE", 70)
-            near_miss_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_FLOOR", max(0, min_score - 2))
+            min_score = self._policy_int("CINESWARM_AUTO_MIN_SCORE", 65)
+            near_miss_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_FLOOR", max(0, min_score - 5))
             affinity_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_AFFINITY_FLOOR", 35)
+            free_slots = max(0, int(pressure.get("limit") or 4) - int(pressure.get("active") or 0))
+            acquire_cap = max(1, min(self._policy_int("CINESWARM_AUTO_ACQUIRE_PER_CYCLE", free_slots or 1), free_slots or 1, 8))
             allowed_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_ALLOWED_GENRES").split(",") if genre.strip()}
             forbidden_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_FORBIDDEN_GENRES").split(",") if genre.strip()}
             required_profile = self._policy("CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE", "HD-1080p")
@@ -675,6 +689,7 @@ class Worker:
             managed_movies = self.plane.planner.radarr.get("api/v3/movie")
             skip_counts = {"low_score": 0, "non_movie_or_status": 0, "forbidden_genre": 0, "owned_or_missing_detail": 0, "missing_profile_or_root": 0, "boxset": 0, "short_runtime": 0}
             near_misses: list[dict[str, Any]] = []
+            acquired: list[dict[str, Any]] = []
 
             def _execute_candidate(candidate: dict[str, Any], candidate_detail: dict[str, Any], decision_name: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
                 plan = self.plane.planner.plan("movie", candidate["title"])
@@ -770,12 +785,15 @@ class Worker:
                     continue
                 result = _execute_candidate(candidate, candidate_detail, "executed_add_search")
                 if result:
-                    return result
+                    acquired.append(result)
+                    if len(acquired) >= acquire_cap:
+                        break
             near_misses.sort(key=lambda item: -float(item.get("score") or 0))
 
-            # Bounded near-miss promote: at most one/hour, score >= floor, theatrical + affinity gates.
-            if near_misses and not self._near_miss_promote_recent():
+            if len(acquired) < acquire_cap and near_misses and (acquired or not self._near_miss_promote_recent()):
                 for miss in near_misses:
+                    if len(acquired) >= acquire_cap:
+                        break
                     score = float(miss.get("score") or 0)
                     if score < near_miss_floor:
                         continue
@@ -807,7 +825,30 @@ class Worker:
                         },
                     )
                     if result:
-                        return result
+                        acquired.append(result)
+
+            leftover = max(0, acquire_cap - len(acquired))
+            never_imported: dict[str, Any] = {"count": 0, "recovered": []}
+            if leftover and self._policy_bool("CINESWARM_FULL_AUTOPILOT") and hasattr(self.plane, "never_imported_movies"):
+                never_imported = self._recover_never_imported(limit=leftover)
+                leftover = max(0, leftover - len(never_imported.get("recovered") or []))
+
+            if acquired:
+                payload = {
+                    **acquired[-1],
+                    "acquisitions": acquired,
+                    "acquired": len(acquired),
+                    "never_imported": never_imported,
+                    "skip_counts": skip_counts,
+                }
+                return payload
+
+            if never_imported.get("recovered"):
+                return self._record_autopilot_decision("executed_never_imported_fill", {
+                    "acquired": 0,
+                    "never_imported": never_imported,
+                    "skip_counts": skip_counts,
+                })
 
             return self._record_autopilot_decision("skipped_no_eligible_candidate", {
                 "desired_recent": desired_recent,
@@ -817,6 +858,7 @@ class Worker:
                 "near_miss_floor": near_miss_floor,
                 "skip_counts": skip_counts,
                 "near_misses": near_misses[:5],
+                "never_imported": never_imported,
             })
         if job_type == "failed_download_recovery":
             if self._emergency_stop():
