@@ -1,0 +1,24 @@
+---
+description: Stay proactive about household ops; never treat health=200 as all-clear
+alwaysApply: true
+---
+
+# Household early warning
+
+CineSwarm `/api/health` is liveness only. The household can look healthy while library debt grows, acquire idles, Plex indexing stalls, or SABnzbd times out.
+
+Before calling the stack fine, overnight-ok, or "nothing going on":
+
+1. Read `GET /api/monitoring/incoming` (or `ControlPlane.incoming_issues_report()`).
+2. Treat `attention` / `critical` as the real status even when overall health is 200.
+3. Name the ranked codes (`library_debt_growing`, `plex_index_stuck`, `acquire_idle`, `sab_probe_failed`, `plex_refresh_backlog`, `never_imported_growing`, `watch_ledger_thin`).
+
+Known telltales from this house:
+
+- `without_file` hovering ~480 and creeping up means Radarr adds without files landing.
+- `file_not_indexed` stuck ~183 means Plex is not catching files already on disk.
+- Repeated `skipped_no_eligible_candidate` with an empty download queue is acquire going idle, not success.
+- SAB `TimeoutError` does not flip `/api/health`.
+- AV1 is advisory for the Tab S9 FE, never a delete/move.
+
+Do not delete or move media files. Prefer bounded searches, Plex refresh, and reporting.

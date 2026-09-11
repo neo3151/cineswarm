@@ -105,6 +105,73 @@ class MonitoringSnapshotHTTPTests(unittest.TestCase):
         self.assertEqual(headers["X-CineSwarm-API-Version"], API_VERSION)
         self.assertEqual(denied, 401)
 
+    def test_incoming_issues_route_is_public(self):
+        self.plane.incoming_issues_report = lambda persist=False: {
+            "severity": "watch",
+            "issues": [{"code": "av1_unaccelerated", "severity": "watch", "summary": "177 AV1 files"}],
+            "headline": "177 AV1 files",
+            "metrics": {},
+            "generated_at": "2026-09-11T00:00:00+00:00",
+        }
+        configured = {"CINESWARM_DASHBOARD_USERNAME": "operator", "CINESWARM_DASHBOARD_PASSWORD": "secret"}
+        with patch.dict(os.environ, configured):
+            status, payload, _ = self.request("/api/monitoring/incoming")
+            alias_status, alias, _ = self.request("/api/v1/monitoring/incoming")
+        self.assertEqual(status, 200)
+        self.assertEqual(alias_status, 200)
+        self.assertEqual(payload["severity"], "watch")
+        self.assertEqual(payload["issues"][0]["code"], "av1_unaccelerated")
+        self.assertEqual(payload, alias)
+
+
+class IncomingIssuesClassifierTests(unittest.TestCase):
+    def test_healthy_snapshot_still_flags_stuck_plex_and_idle_acquire(self):
+        from cineswarm_ops_pulse import classify_issues, overall_severity
+        issues = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "without_file": 487,
+            "delta_without_file": 4,
+            "file_not_indexed": 185,
+            "delta_file_not_indexed": 0,
+            "never_imported": 522,
+            "delta_never_imported": 12,
+            "acquire_skip_streak": 4,
+            "downloads_active": 0,
+            "last_acquire_decision": "skipped_no_eligible_candidate",
+            "skip_counts": {"low_score": 12, "short_runtime": 9},
+            "plex_refresh_pending": 0,
+            "watch_titles": 3,
+            "av1_count": 177,
+        })
+        codes = {issue["code"] for issue in issues}
+        self.assertIn("library_debt_growing", codes)
+        self.assertIn("plex_index_stuck", codes)
+        self.assertIn("never_imported_growing", codes)
+        self.assertIn("acquire_idle", codes)
+        self.assertIn("watch_ledger_thin", codes)
+        self.assertIn("av1_unaccelerated", codes)
+        self.assertEqual(overall_severity(issues), "attention")
+
+    def test_ok_when_services_and_queues_are_quiet(self):
+        from cineswarm_ops_pulse import classify_issues, overall_severity
+        issues = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "without_file": 10,
+            "file_not_indexed": 2,
+            "never_imported": 3,
+            "acquire_skip_streak": 0,
+            "downloads_active": 1,
+            "last_acquire_decision": "executed_add_search",
+            "watch_titles": 200,
+            "av1_count": 0,
+        })
+        self.assertEqual(issues, [])
+        self.assertEqual(overall_severity(issues), "ok")
+
 
 class DiscordMonitorCommandTests(unittest.TestCase):
     def test_monitor_command_formats_snapshot(self):
@@ -128,6 +195,18 @@ class DiscordMonitorCommandTests(unittest.TestCase):
         self.assertIn("Pending approve: 2", text)
         self.assertIn("sonarr", text.lower())
         self.assertIn("task_attention", text)
+
+    def test_incoming_command_lists_ranked_issues(self):
+        report = {
+            "severity": "attention",
+            "headline": "Acquire skipped 4 cycles in a row with an empty download queue.",
+            "issues": [{"code": "acquire_idle", "severity": "attention", "summary": "Acquire skipped 4 cycles in a row with an empty download queue."}],
+        }
+        plane = SimpleNamespace(incoming_issues_report=lambda persist=False: report, store=SimpleNamespace())
+        service = DiscordService(plane)
+        text = service.handle("incoming", 42)
+        self.assertIn("ATTENTION", text)
+        self.assertIn("acquire_idle", text)
 
 
 class MonitorWebhookTransitionTests(unittest.TestCase):

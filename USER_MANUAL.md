@@ -94,7 +94,8 @@ or mention the bot:
 | `!cine help` | Show the command list | No |
 | `!cine status` | Show service, worker, catalog, and queue health | No |
 | `!cine health` | Alias for status | No |
-| `!cine monitor` | Live ops digest from `/api/monitoring/snapshot` (queues, worker, top issues) | No |
+| `!cine monitor` | Live ops digest from `/api/monitoring/snapshot` plus ranked incoming issues | No |
+| `!cine incoming` | Ranked household problems that `/api/health` hides (debt, idle acquire, Plex lag, SAB) | No |
 | `!cine queue` | List actual Radarr/Sonarr releases, states, progress, remaining size, time, and errors | No |
 | `!cine discover` | Show ranked missing candidates with acquisition IDs | No |
 | `!cine discover refresh` | Run watch-taste discovery immediately and show verified results | Local queue only |
@@ -590,14 +591,17 @@ Returns compact JSON for external watchers and Discord live monitor:
 
 The endpoint is read-only, free of secrets, and available without dashboard authentication (same model as `/api/health`). Uptime Kuma can keep using `/api/health` for binary up/down checks; use the snapshot when a watcher needs richer queue and failure context.
 
+`GET /api/monitoring/incoming` (and `/api/v1/monitoring/incoming`) ranks problems that still look healthy: library debt growth, Plex files not indexed, idle acquire streaks, SAB probe failures, Plex refresh backlog, thin watch ledger. Worker `ops_pulse` stores that report hourly and notifies Discord on `attention`/`critical`.
+
 Discord:
 
 ```text
 !cine monitor
+!cine incoming
 /monitor
 ```
 
-Formats a short ops digest from the same snapshot (overall status, queue depths, worker freshness, top issues). It complements — and does not replace — existing `!cine status` / `!cine health`.
+Formats a short ops digest from the same snapshot (overall status, queue depths, worker freshness, top issues) plus the incoming pulse. It complements — and does not replace — existing `!cine status` / `!cine health`.
 
 ### External monitor webhook
 

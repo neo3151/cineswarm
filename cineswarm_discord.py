@@ -178,7 +178,18 @@ class DiscordService:
             top_issues = [f"• Unhealthy: {', '.join(unhealthy)}"]
         if not top_issues:
             top_issues = ["• No recent actionable failures"]
+        incoming_lines = []
+        if hasattr(self.plane, "incoming_issues_report"):
+            try:
+                incoming = self.plane.incoming_issues_report(persist=False) or {}
+                for issue in (incoming.get("issues") or [])[:5]:
+                    incoming_lines.append(f"• `{issue.get('code')}` {issue.get('summary')}")
+                if not incoming_lines:
+                    incoming_lines = ["• None ranked above ok"]
+            except Exception:
+                incoming_lines = ["• Incoming pulse unavailable"]
         stop = "ACTIVE" if snapshot.get("emergency_stop") else "off"
+        incoming_block = ("\n\n**Incoming:**\n" + "\n".join(incoming_lines)) if incoming_lines else ""
         return (
             f"{icon} **CineSwarm Live Monitor — {overall}**\n"
             "```text\n"
@@ -191,7 +202,21 @@ class DiscordService:
             + ("\n".join(srv_lines) if srv_lines else "  • No service telemetry")
             + "\n\n**Top issues:**\n"
             + "\n".join(top_issues)
+            + incoming_block
         )
+
+    def _incoming(self) -> str:
+        if not hasattr(self.plane, "incoming_issues_report"):
+            return "Incoming-issues pulse is not available on this control plane."
+        report = self.plane.incoming_issues_report(persist=False)
+        severity = str(report.get("severity") or "ok").upper()
+        icon = {"CRITICAL": "🔴", "ATTENTION": "🟠", "WATCH": "🟡", "OK": "🟢"}.get(severity, "⚪")
+        lines = [f"{icon} **Incoming issues — {severity}**", str(report.get("headline") or "")]
+        for issue in report.get("issues") or []:
+            lines.append(f"• `{issue.get('code')}` {issue.get('summary')}")
+        if len(lines) == 2:
+            lines.append("• None ranked above ok")
+        return "\n".join(line for line in lines if line)
 
 
     def _full_autopilot(self) -> bool:
@@ -361,11 +386,13 @@ class DiscordService:
         text = content.strip()
         lowered = text.casefold()
         if lowered in ("help", "commands"):
-            return "Commands: `status`, `health`, `monitor`, `queue`, `discover`, `discover refresh`, `acquire ID`, `franchise`, `watch [MINS] [GENRE]`, `add Movie Title (Year)`, `plan TITLE`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback last|ID good|bad NOTE`, `digest`, `scan_plex`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
+            return "Commands: `status`, `health`, `monitor`, `incoming`, `queue`, `discover`, `discover refresh`, `acquire ID`, `franchise`, `watch [MINS] [GENRE]`, `add Movie Title (Year)`, `plan TITLE`, `release RELEASE_NAME`, `grab RELEASE_NAME`, `profile`, `profile admin|partner|kids|guest`, `decisions`, `decision ID`, `feedback last|ID good|bad NOTE`, `digest`, `scan_plex`, `scan_health`. Full autopilot executes paired-user actions immediately and logs every decision."
         if lowered in ("status", "health"):
             return self._status()
         if lowered in ("monitor", "ops", "live_monitor"):
             return self._monitor()
+        if lowered in ("incoming", "issues", "pulse"):
+            return self._incoming()
         if lowered == "decisions":
             return self._decision_history()
         if lowered.startswith("decision "):

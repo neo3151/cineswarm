@@ -224,6 +224,7 @@ class Worker:
             "preservation_scan": int(os.environ.get("CINESWARM_PRESERVATION_INTERVAL", "604800")),
             "database_maintenance": int(os.environ.get("CINESWARM_DATABASE_MAINTENANCE_INTERVAL", "86400")),
             "daily_digest": int(os.environ.get("CINESWARM_DIGEST_INTERVAL", "86400")),
+            "ops_pulse": int(os.environ.get("CINESWARM_OPS_PULSE_INTERVAL", "3600")),
         }
 
     def _policy(self, key: str, default: str = "") -> str:
@@ -498,6 +499,17 @@ class Worker:
                 if payload.get("error"):
                     fields.append({"name": "Error Details", "value": f"```{payload['error']}```", "inline": False})
                 embed = {"title": title, "color": color, "fields": fields, "timestamp": timestamp}
+            elif event_type == "incoming_issues":
+                severity = str(payload.get("severity") or "watch").upper()
+                color = 15105570 if payload.get("severity") == "attention" else 15158332
+                title = f"Incoming household issues — {severity}"
+                fields.append({"name": "Headline", "value": str(payload.get("headline") or "See issues")[:1000], "inline": False})
+                lines = []
+                for issue in (payload.get("issues") or [])[:6]:
+                    lines.append(f"• `{issue.get('code')}` {issue.get('summary')}")
+                if lines:
+                    fields.append({"name": "Ranked", "value": "\n".join(lines)[:1000], "inline": False})
+                embed = {"title": title, "color": color, "fields": fields, "timestamp": timestamp}
             else:
                 embed = {"title": title, "description": f"```json\n{json_text(details)[:3500]}\n```", "color": color, "timestamp": timestamp}
 
@@ -669,6 +681,15 @@ class Worker:
                 )
             else:
                 report["automatic_action"] = {"status": "not_run", "enabled": self._auto_refresh_allowed(), "cooldown_elapsed": self._refresh_cooldown_elapsed(), "reason": "policy_or_cooldown"}
+            try:
+                report["incoming"] = self.plane.incoming_issues_report(persist=True)
+            except Exception as exc:
+                report["incoming"] = {"status": "error", "error": str(exc)}
+            return report
+        if job_type == "ops_pulse":
+            report = self.plane.incoming_issues_report(persist=True)
+            if report.get("severity") in {"attention", "critical"}:
+                self._send_notification("incoming_issues", report, "incoming_issues")
             return report
         if job_type == "autonomous_acquisition":
             if self._emergency_stop():
@@ -1030,6 +1051,8 @@ class Worker:
 
     @staticmethod
     def _audit_mode(job_type: str, result: dict[str, Any] | None = None) -> str:
+        if job_type == "ops_pulse":
+            return "read-only"
         if job_type == "queue_monitor":
             return "approval-gated"
         if job_type == "failed_download_recovery":

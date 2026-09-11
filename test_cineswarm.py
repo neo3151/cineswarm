@@ -979,6 +979,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(Worker._audit_mode("queue_monitor"), "approval-gated")
         self.assertEqual(Worker._audit_mode("service_refresh"), "local-write")
         self.assertEqual(Worker._audit_mode("autonomous_acquisition"), "automatic")
+        self.assertEqual(Worker._audit_mode("ops_pulse"), "read-only")
         self.assertEqual(Worker._audit_mode("reconcile_library", {"automatic_action": {"status": "completed"}}), "automatic")
 
     def test_failed_download_recovery_does_not_alert_for_zero_failures(self):

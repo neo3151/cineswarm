@@ -36,6 +36,7 @@ from cineswarm_discovery import DiscoveryEngine, parse_json
 from cineswarm_health import MediaHealthScanner
 from cineswarm_library_brain import LibraryBrain
 from cineswarm_library_intelligence import VaultLibraryComprehension
+from cineswarm_ops_pulse import run_ops_pulse
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_user_profiles import MultiUserTasteEngine
 from cineswarm_mesh import SwarmMeshSyncEngine
@@ -105,6 +106,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/operations/queue": "/api/operations/queue",
     "/api/v1/preservation": "/api/preservation",
     "/api/v1/monitoring/snapshot": "/api/monitoring/snapshot",
+    "/api/v1/monitoring/incoming": "/api/monitoring/incoming",
 }
 
 
@@ -2756,6 +2758,11 @@ class ControlPlane:
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
 
+    def incoming_issues_report(self, persist: bool = False) -> dict[str, Any]:
+        """Rank household problems that health=200 still hides (debt drift, idle acquire, SAB, Plex lag)."""
+        report = run_ops_pulse(self, persist=persist)
+        return report
+
     def acquisition_plan(self, media_type: str, term: str, actor: str = "dashboard") -> dict[str, Any]:
         if not self.planner:
             raise AgentError("Acquisition planner is not configured")
@@ -3946,7 +3953,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _public_path(path: str, method: str) -> bool:
-        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot"}
+        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming"}
         public_post = {"/api/webhooks/plex", "/api/webhooks/sabnzbd"}
         if method == "GET":
             return path in public_get
@@ -4028,6 +4035,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, {"error": "hours must be an integer"})
                 return
             self._send(200, self.plane.monitoring_snapshot(hours=hours))
+        elif canonical_path == "/api/monitoring/incoming":
+            persist = str(urllib.parse.parse_qs(parsed.query).get("persist", ["0"])[0]).lower() in {"1", "true", "yes"}
+            self._send(200, self.plane.incoming_issues_report(persist=persist))
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):
