@@ -93,6 +93,11 @@ class AutonomicSwarmEvolutionEngine:
 
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         genres_json = json.dumps(metadata.get("Genre", []))
+        try:
+            from cineswarm_library_brain import LibraryBrain
+            LibraryBrain(self.catalog_db_path, self.control_db_path).record_watch_event(event_data)
+        except Exception:
+            pass
 
         if reward_score != 0.0:
             try:

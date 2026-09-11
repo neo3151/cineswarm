@@ -24,6 +24,7 @@ ENV/
 *.pdf
 *_temp.html
 LATEST_VAULT_ADDITIONS.md
+cineswarm_library_portrait.json
 *.log
 *.png
 *.svg

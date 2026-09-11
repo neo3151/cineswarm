@@ -1443,5 +1443,144 @@ class HouseholdCatchupTests(unittest.TestCase):
         self.assertEqual(calls, ["gemini-2.5-flash"])
 
 
+class LibraryBrainTests(unittest.TestCase):
+    def test_parse_media_info_and_quality_label(self):
+        from cineswarm_library_brain import parse_media_info, quality_label, resolution_bucket, credit_kind, watched_items_from_xml
+        info = parse_media_info({
+            "videoFormat": "HEVC",
+            "audioFormat": "DTS",
+            "width": 1920,
+            "height": 1080,
+            "videoHdrFormat": "HDR10",
+            "audioChannels": 6,
+            "audioLanguages": ["eng", "spa"],
+            "videoBitrate": 8000000,
+            "runTime": "01:44:08.0330000",
+        })
+        self.assertEqual(info["video_codec"], "hevc")
+        self.assertEqual(info["hdr"], "HDR10")
+        self.assertEqual(info["duration_mins"], 104.1)
+        self.assertEqual(quality_label("Heat (1995) Bluray-1080p.mkv"), "Bluray-1080p")
+        self.assertEqual(resolution_bucket(3840, 2160), "4K")
+        self.assertEqual(credit_kind(0, None), "actor")
+        self.assertEqual(credit_kind(1, "Director"), "director")
+        xml = ET.fromstring("""<MediaContainer><Video type="movie" ratingKey="1" title="Heat" year="1995" viewCount="3" lastViewedAt="1" duration="100000"><Genre tag="Crime"/><Guid id="tmdb://949"/></Video></MediaContainer>""")
+        watched = watched_items_from_xml(xml)
+        self.assertEqual(watched[0]["title"], "Heat")
+        self.assertEqual(watched[0]["tmdb_id"], "949")
+
+    def test_enrich_indexes_files_people_and_collections(self):
+        from cineswarm_library_brain import LibraryBrain
+        from cineswarm_sync import SCHEMA as CATALOG_SCHEMA
+        with tempfile.TemporaryDirectory() as directory:
+            radarr = os.path.join(directory, "radarr.db")
+            catalog = os.path.join(directory, "catalog.db")
+            control = os.path.join(directory, "control.db")
+            with sqlite3.connect(radarr) as conn:
+                conn.executescript("""
+                    CREATE TABLE Movies (Id INTEGER, MovieMetadataId INTEGER, MovieFileId INTEGER);
+                    CREATE TABLE MovieFiles (Id INTEGER, MovieId INTEGER, Quality TEXT, Size INTEGER, MediaInfo TEXT, RelativePath TEXT, Edition TEXT);
+                    CREATE TABLE MovieMetadata (Id INTEGER, Title TEXT, Studio TEXT, Certification TEXT, CollectionTitle TEXT, CollectionTmdbId INTEGER, Ratings TEXT);
+                    CREATE TABLE Credits (MovieMetadataId INTEGER, Name TEXT, Character TEXT, Job TEXT, Type INTEGER, "Order" INTEGER, PersonTmdbId INTEGER);
+                """)
+                conn.execute("INSERT INTO Movies VALUES (10, 2, 5)")
+                conn.execute(
+                    "INSERT INTO MovieFiles VALUES (5, 10, ?, 123456789, ?, 'Heat (1995) Bluray-1080p.mkv', 'Director''s Cut')",
+                    (json.dumps({"quality": 7}), json.dumps({"videoFormat": "h264", "width": 1920, "height": 1080, "audioFormat": "dts", "audioChannels": 6, "runTime": "02:50:00"})),
+                )
+                conn.execute(
+                    "INSERT INTO MovieMetadata VALUES (2, 'Heat', 'Warner Bros.', 'R', 'Heat Collection', 99, ?)",
+                    (json.dumps({"imdb": {"value": 8.3, "votes": 700000}}),),
+                )
+                conn.execute("INSERT INTO Credits VALUES (2, 'Michael Mann', NULL, 'Director', 1, 0, 1)")
+                conn.execute("INSERT INTO Credits VALUES (2, 'Al Pacino', 'Vincent', NULL, 0, 0, 2)")
+            with sqlite3.connect(catalog) as conn:
+                conn.executescript(CATALOG_SCHEMA)
+                conn.execute(
+                    """INSERT INTO catalog_items (media_type, source, source_id, source_native_id, title, year, genres_json, raw_json, first_seen, last_seen, present)
+                       VALUES ('movie', 'radarr', 'tmdb:949', 10, 'Heat', 1995, '["Crime"]', '{}', 't', 't', 1)"""
+                )
+            brain = LibraryBrain(catalog, control, radarr_db=radarr, sonarr_db=os.path.join(directory, "missing-sonarr.db"))
+            result = brain.enrich_from_radarr()
+            self.assertEqual(result["files"], 1)
+            self.assertGreaterEqual(result["people"], 2)
+            self.assertEqual(result["collections"], 1)
+            with sqlite3.connect(catalog) as conn:
+                file_row = conn.execute("SELECT video_codec, width, edition FROM catalog_files").fetchone()
+                self.assertEqual(file_row[0], "h264")
+                self.assertEqual(file_row[1], 1920)
+                self.assertEqual(file_row[2], "Director's Cut")
+                people = {row[0] for row in conn.execute("SELECT person_name FROM catalog_people")}
+                self.assertIn("Michael Mann", people)
+                self.assertIn("Al Pacino", people)
+            credits = brain.search_person("Michael Mann")["credits"]
+            self.assertEqual(credits[0]["title"], "Heat")
+            answer = brain.answer("What HDR and AV1 files do I have?")
+            self.assertIn("files indexed", answer)
+            collection_answer = brain.answer("Heat franchise collection")
+            self.assertIn("Heat Collection", collection_answer)
+
+    def test_watch_ledger_and_local_ask(self):
+        from cineswarm_agents import AgentOrchestrator
+        from cineswarm_library_brain import LibraryBrain
+        from cineswarm_sync import SCHEMA as CATALOG_SCHEMA
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = os.path.join(directory, "catalog.db")
+            control = os.path.join(directory, "control.db")
+            with sqlite3.connect(catalog) as conn:
+                conn.executescript(CATALOG_SCHEMA)
+            brain = LibraryBrain(catalog, control, radarr_db=os.path.join(directory, "no-radarr.db"), sonarr_db=os.path.join(directory, "no-sonarr.db"))
+            history = SimpleNamespace(get_watched_items=lambda limit=200: ET.fromstring(
+                """<MediaContainer><Video type="movie" ratingKey="9" title="The Big Lebowski" year="1998" viewCount="4" lastViewedAt="1" duration="7000000"><Genre tag="Comedy"/></Video></MediaContainer>"""
+            ))
+            synced = brain.sync_watch_ledger(history)
+            self.assertEqual(synced["upserted"], 1)
+            brain.record_watch_event({
+                "event": "media.scrobble",
+                "Account": {"title": "neo"},
+                "Metadata": {"title": "Fargo", "year": 1996, "type": "movie", "ratingKey": "11", "duration": 6000000, "viewOffset": 6000000, "Genre": [{"tag": "Crime"}]},
+            })
+            answer = brain.answer("What have I actually watched?")
+            self.assertIn("The Big Lebowski", answer)
+            store = SimpleNamespace(
+                audit=lambda *args, **kwargs: None,
+                status=lambda: {},
+                latest_snapshot=lambda service: None,
+                latest_audit_details=lambda *args, **kwargs: None,
+            )
+            orchestrator = AgentOrchestrator(store, catalog)
+            orchestrator.model.provider = "taste"
+            orchestrator.library_brain = brain
+            orchestrator.tools.snapshot_summary = lambda: {"plex": {"status": "healthy"}}
+            orchestrator.tools.cached_reconciliation = lambda: {}
+            orchestrator.tools.search_catalog = lambda prompt: [{"title": "Fargo", "year": 1996}]
+            orchestrator.tools.radarr = SimpleNamespace(get=lambda *args, **kwargs: {"records": []})
+            orchestrator.tools.sonarr = SimpleNamespace(get=lambda *args, **kwargs: {"records": []})
+            result = orchestrator.ask("what genres are overrepresented in my library?")
+            self.assertEqual(result["librarian"], "local")
+            self.assertIn("Local librarian", result["answer"])
+
+    def test_health_scan_prefers_unscanned_titles(self):
+        from cineswarm_health import MediaHealthScanner
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = os.path.join(directory, "catalog.db")
+            video = os.path.join(directory, "ready.mkv")
+            with open(video, "wb") as handle:
+                handle.write(b"not-a-real-video")
+            with sqlite3.connect(catalog) as conn:
+                conn.execute("CREATE TABLE catalog_items (id INTEGER PRIMARY KEY, title TEXT, path TEXT, raw_json TEXT, source_native_id INTEGER, media_type TEXT, present INTEGER, video_codec TEXT, audio_codec TEXT, duration_mins REAL, size_mb REAL)")
+                conn.execute("INSERT INTO catalog_items VALUES (1, 'Known', ?, '{}', 1, 'movie', 1, 'h264', 'aac', 90, 100)", (video,))
+                conn.execute("INSERT INTO catalog_items VALUES (2, 'Unknown', ?, '{}', 2, 'movie', 1, NULL, NULL, NULL, NULL)", (video,))
+            scanner = MediaHealthScanner(catalog)
+            scanned = []
+            scanner.inspect_file = lambda path, deep_decode=False: scanned.append(path) or {"status": "healthy", "video_codec": "hevc", "audio_codec": "aac", "duration_mins": 91, "size_mb": 12, "width": 1920, "height": 1080, "hdr": None, "audio_channels": 2}
+            scanner.scan_catalog(limit=1)
+            self.assertEqual(len(scanned), 1)
+            with sqlite3.connect(catalog) as conn:
+                unknown = conn.execute("SELECT video_codec FROM catalog_items WHERE id=2").fetchone()[0]
+            self.assertEqual(unknown, "hevc")
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -619,15 +619,28 @@ class Worker:
             if unhealthy:
                 self._send_notification("service_unhealthy", {"services": unhealthy}, "service_unhealthy")
             self._post_monitor_webhook_on_transition(result)
+            try:
+                history = self.plane.discovery.playback_history if self.plane.discovery else None
+                if history:
+                    result["watch_ledger"] = self.plane.library_brain.sync_watch_ledger(history)
+            except Exception as exc:
+                result["watch_ledger"] = {"status": "error", "error": str(exc)}
             return result
         if job_type == "catalog_sync":
             sync_catalog()
+            brain_result: dict[str, Any] = {"status": "skipped"}
+            try:
+                history = self.plane.discovery.playback_history if self.plane.discovery else None
+                brain_result = self.plane.library_brain.refresh(playback_history=history)
+            except Exception as exc:
+                brain_result = {"status": "error", "error": str(exc)}
+                print(f"Failed to refresh library brain: {exc}", flush=True)
             try:
                 from export_gem_knowledge import generate_gem_knowledge
                 generate_gem_knowledge()
             except Exception as exc:
                 print(f"Failed to auto-update Gem knowledge: {exc}", flush=True)
-            return {"status": "catalog_synced"}
+            return {"status": "catalog_synced", "library_brain": brain_result}
         if job_type == "discovery_refresh":
             if not self._policy_bool("CINESWARM_DISCOVERY_ENABLED", "true"):
                 return {"status": "disabled"}

@@ -34,6 +34,7 @@ from cineswarm_agents import AcquisitionPlanner, AgentError, AgentOrchestrator, 
 from cineswarm_chapters import ChapterSummarizer
 from cineswarm_discovery import DiscoveryEngine, parse_json
 from cineswarm_health import MediaHealthScanner
+from cineswarm_library_brain import LibraryBrain
 from cineswarm_library_intelligence import VaultLibraryComprehension
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_user_profiles import MultiUserTasteEngine
@@ -1501,6 +1502,7 @@ class ControlPlane:
         self.verifier = SelfReflectionVerifier(CATALOG_DB)
         self.taste_memory = UserTasteMemory(CONTROL_DB)
         self.vault_comprehension = VaultLibraryComprehension(CATALOG_DB)
+        self.library_brain = LibraryBrain(CATALOG_DB, CONTROL_DB)
         self.evolution_engine = AutonomicSwarmEvolutionEngine(CONTROL_DB, CATALOG_DB)
         self.user_profiles = MultiUserTasteEngine(CONTROL_DB)
         self.mesh_engine = SwarmMeshSyncEngine(CONTROL_DB)
@@ -1513,6 +1515,7 @@ class ControlPlane:
         self.agents.vault_comprehension = self.vault_comprehension
         self.agents.dense_vector_index = self.dense_vector_index
         self.agents.evolution_engine = self.evolution_engine
+        self.agents.library_brain = self.library_brain
 
 
 
@@ -2415,7 +2418,8 @@ class ControlPlane:
             },
             "reinforcement": feedback_stats,
             "double_feature_engine": {"status": "ready" if self.agents and self.agents.model.configured else "offline"},
-            "storage_optimization_agent": {"status": "ready"}
+            "storage_optimization_agent": {"status": "ready"},
+            "library_brain": self.library_brain.coverage() if getattr(self, "library_brain", None) else {},
         }
 
     def evaluate_release_quality_guard(self, title: str, size_gb: float, video_codec: str = "", release_name: str = "") -> dict[str, Any]:
@@ -4185,6 +4189,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, self.plane.get_intelligence_status())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
+        elif self.path == "/api/library/portrait":
+            try:
+                self._send(200, self.plane.library_brain.build_portrait())
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path.split("?", 1)[0] == "/api/library/person":
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            name = (query.get("q") or query.get("name") or [""])[0]
+            try:
+                self._send(200, self.plane.library_brain.search_person(name))
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
+        elif self.path.split("?", 1)[0] == "/api/library/collections":
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            needle = (query.get("q") or [""])[0]
+            try:
+                self._send(200, {"collections": self.plane.library_brain.collection_map(needle)})
+            except Exception as exc:
+                self._send(500, {"error": str(exc)})
         elif self.path == "/api/intelligence/evolution-report":
             try:
                 self._send(200, self.plane.evolution_engine.get_evolution_report())
@@ -4322,6 +4347,15 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.plane.agents.ask(payload.get("prompt", ""), "dashboard")
                 self._send(200, result)
             except (json.JSONDecodeError, AgentError) as exc:
+                self._send(400, {"error": str(exc)})
+        elif self.path == "/api/library/ask":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                prompt = payload.get("prompt") or payload.get("q") or ""
+                answer = self.plane.library_brain.answer(prompt)
+                self._send(200, {"answer": answer, "librarian": "local"})
+            except (json.JSONDecodeError, Exception) as exc:
                 self._send(400, {"error": str(exc)})
         elif self.path == "/api/vibe-search":
             length = int(self.headers.get("Content-Length", "0"))
@@ -4477,6 +4511,10 @@ class Handler(BaseHTTPRequestHandler):
                 if account and hasattr(self.plane, "user_profiles"):
                     self.plane.user_profiles.apply_plex_account(str(account))
                 res_telemetry = self.plane.evolution_engine.process_plex_playback_event(payload)
+                try:
+                    res_telemetry["watch_ledger"] = self.plane.library_brain.record_watch_event(payload)
+                except Exception:
+                    pass
                 if event in {"media.scrobble", "media.stop"} and self.plane.discovery:
                     try:
                         res_telemetry["rescored_candidates"] = int(self.plane.discovery.rescore_open_candidates() or 0)

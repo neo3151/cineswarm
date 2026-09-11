@@ -145,7 +145,16 @@ Examples:
 !cine are Plex, Radarr, and Sonarr healthy?
 ```
 
-Responses use the local catalog, service snapshots, reconciliation report, and Gemini model. Conversational chat cannot silently add, search, grab, delete, or modify media.
+Responses use the local library brain first: catalog, Radarr file specs, credits, collections, Plex watch ledger, service snapshots, and reconciliation counts. Gemini is optional and currently off (`CINESWARM_MODEL_PROVIDER=taste`). Conversational chat cannot silently add, search, grab, delete, or modify media.
+
+Read-only library maps:
+
+```text
+GET /api/library/portrait
+GET /api/library/person?q=Coen
+GET /api/library/collections?q=Alien
+POST /api/library/ask   {"prompt":"what have I actually watched?"}
+```
 
 ---
 

@@ -6,7 +6,8 @@ CineSwarm maintains a complete local catalog from Radarr and Sonarr for media-ty
 - **`USER_MANUAL.md`**: Complete operator guide for Discord, dashboard, acquisitions, upgrades, autonomy, alerts, reliability, and troubleshooting.
 - **`USER_MANUAL.pdf`**: Professionally typeset A4 edition of the complete operator guide.
 - **`cineswarm_sync.py`**: Full, idempotent sync for every Radarr movie and Sonarr series.
-- **`cineswarm_catalog.db`**: Durable SQLite source of truth created by the sync. It stores separate movie and series records, normalized metadata, source IDs, raw source rows, sync history, and current/stale state.
+- **`cineswarm_catalog.db`**: Durable SQLite source of truth created by the sync. It stores separate movie and series records, normalized metadata, source IDs, raw source rows, sync history, current/stale state, plus library-brain tables for files, people, ratings, and collections.
+- **`cineswarm_library_brain.py`**: Indexes Radarr MovieFiles/Credits and Plex watches so chat and `/api/library/*` know the shelf at file, person, franchise, and playback level without Gemini.
 - **`cineswarm_gem_prompt.md`**: Copy-ready Gemini Gem instructions for the current CineSwarm command contract, full autopilot, decision learning, recommendations, queues, and release operations.
 - **`LATEST_VAULT_ADDITIONS.md`**: Human-readable summary of the complete current catalog.
 
@@ -57,7 +58,7 @@ Service credentials are only read into process memory and are never written to s
 
 ## Phase 2 Read-Only Agent Swarm
 
-`cineswarm_agents.py` adds librarian, curator, health, and request specialists behind a supervisor. The dashboard now includes `POST /api/chat`, which uses the local catalog and service state as context. It can run without a model key and will report that the hosted model is not configured.
+`cineswarm_agents.py` adds librarian, curator, health, and request specialists behind a supervisor. The dashboard now includes `POST /api/chat`, which answers from the local library brain (files, people, collections, watch ledger) when no hosted model is configured. `GET /api/library/portrait` is the compact household map.
 
 Discovery defaults to watch-taste Radarr lookups (`CINESWARM_MODEL_PROVIDER=taste` or `CINESWARM_DISCOVERY_BACKEND=taste`). That path uses Plex watch history plus Radarr title/director/genre lookups and never calls Gemini. Set the provider back to `gemini` only when a working AI Studio project is available:
 

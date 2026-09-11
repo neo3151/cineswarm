@@ -53,15 +53,29 @@ class MediaHealthScanner:
             if duration <= 0:
                 return {"status": "corrupt", "error": "Invalid or missing video duration"}
 
-            video_codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "video"), "unknown")
-            audio_codec = next((s.get("codec_name") for s in streams if s.get("codec_type") == "audio"), "unknown")
+            video = next((s for s in streams if s.get("codec_type") == "video"), {})
+            audio = next((s for s in streams if s.get("codec_type") == "audio"), {})
+            video_codec = video.get("codec_name") or "unknown"
+            audio_codec = audio.get("codec_name") or "unknown"
+            hdr = ""
+            color = str(video.get("color_transfer") or video.get("color_primaries") or "").lower()
+            if "smpte2084" in color or "hlg" in color or "bt2020" in color or "arib-std-b67" in color:
+                hdr = str(video.get("color_transfer") or "hdr")
+            side = video.get("side_data_list") or []
+            if any("DOVI" in str(item.get("side_data_type") or "").upper() or "HDR" in str(item.get("side_data_type") or "").upper() for item in side):
+                hdr = hdr or "hdr"
 
             res_dict = {
                 "status": "healthy",
                 "duration_mins": round(duration / 60, 1),
                 "video_codec": video_codec,
                 "audio_codec": audio_codec,
-                "size_mb": round(os.path.getsize(filepath) / (1024 * 1024), 1)
+                "size_mb": round(os.path.getsize(filepath) / (1024 * 1024), 1),
+                "width": video.get("width"),
+                "height": video.get("height"),
+                "hdr": hdr or None,
+                "audio_channels": audio.get("channels"),
+                "bitrate_kbps": int(round(float(fmt.get("bit_rate") or 0) / 1000.0)) if fmt.get("bit_rate") else None,
             }
 
             if deep_decode:
@@ -142,8 +156,24 @@ class MediaHealthScanner:
                 conn.execute("ALTER TABLE catalog_items ADD COLUMN duration_mins REAL")
             if "size_mb" not in cols:
                 conn.execute("ALTER TABLE catalog_items ADD COLUMN size_mb REAL")
+            for name, decl in (
+                ("width", "INTEGER"),
+                ("height", "INTEGER"),
+                ("hdr", "TEXT"),
+                ("audio_channels", "INTEGER"),
+            ):
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE catalog_items ADD COLUMN {name} {decl}")
 
-            rows = conn.execute("SELECT id, title, path, raw_json, source_native_id, media_type FROM catalog_items WHERE present=1 AND path IS NOT NULL ORDER BY RANDOM() LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, title, path, raw_json, source_native_id, media_type FROM catalog_items
+                WHERE present=1 AND path IS NOT NULL
+                ORDER BY CASE WHEN video_codec IS NULL OR video_codec='' THEN 0 ELSE 1 END, RANDOM()
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
 
             for item_id, title, path, raw_json, native_id, m_type in rows:
                 target_file = self.locate_video_file(path)
@@ -162,8 +192,23 @@ class MediaHealthScanner:
                 else:
                     healthy_count += 1
                     conn.execute(
-                        "UPDATE catalog_items SET video_codec=?, audio_codec=?, duration_mins=?, size_mb=? WHERE id=?",
-                        (res.get("video_codec"), res.get("audio_codec"), res.get("duration_mins"), res.get("size_mb"), item_id)
+                        """
+                        UPDATE catalog_items SET video_codec=?, audio_codec=?, duration_mins=?, size_mb=?,
+                            width=COALESCE(?, width), height=COALESCE(?, height), hdr=COALESCE(?, hdr),
+                            audio_channels=COALESCE(?, audio_channels)
+                        WHERE id=?
+                        """,
+                        (
+                            res.get("video_codec"),
+                            res.get("audio_codec"),
+                            res.get("duration_mins"),
+                            res.get("size_mb"),
+                            res.get("width"),
+                            res.get("height"),
+                            res.get("hdr"),
+                            res.get("audio_channels"),
+                            item_id,
+                        ),
                     )
 
         return {

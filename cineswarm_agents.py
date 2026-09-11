@@ -982,7 +982,18 @@ class AgentOrchestrator:
 
         self.store.audit(actor, "agent_request", ",".join(role.name for role in roles), "read-only", "started", {"prompt_length": len(prompt)})
         if not self.model.configured:
-            message = "The agent swarm is connected to the local catalog, but the hosted model is not configured yet. Add a Gemini key as CINESWARM_MODEL_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY in .env."
+            brain = getattr(self, "library_brain", None)
+            if brain is None:
+                try:
+                    from cineswarm_library_brain import LibraryBrain
+                    brain = LibraryBrain()
+                except Exception:
+                    brain = None
+            if brain is not None:
+                message = brain.answer(prompt, extra_context=context)
+                self.store.audit(actor, "agent_request", ",".join(role.name for role in roles), "read-only", "local_librarian", {"prompt_length": len(prompt)})
+                return {"answer": message, "roles": [role.name for role in roles], "context": context, "model_configured": False, "librarian": "local"}
+            message = "The local catalog is connected, but the library brain could not load and no hosted model is configured."
             self.store.audit(actor, "agent_request", ",".join(role.name for role in roles), "read-only", "not_configured", {})
             return {"answer": message, "roles": [role.name for role in roles], "context": context, "model_configured": False}
         # Define native tools schema for ReAct function calling

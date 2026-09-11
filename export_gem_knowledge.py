@@ -139,6 +139,15 @@ def generate_gem_knowledge() -> dict[str, Any]:
             "max_concurrent_downloads": swarm_memory.get("active_policies", {}).get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "2"),
         },
     }
+    try:
+        from cineswarm_library_brain import LibraryBrain
+        portrait = LibraryBrain().build_portrait()
+        knowledge["library_brain"] = portrait.get("coverage") or {}
+        knowledge["library_people"] = portrait.get("people") or {}
+        knowledge["library_files"] = portrait.get("files") or {}
+        knowledge["recent_watches"] = portrait.get("recent_watches") or []
+    except Exception:
+        pass
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(knowledge, f, indent=2)
