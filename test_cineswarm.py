@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cineswarm_agents import AcquisitionPlanner, AgentError, HostedModelClient, PlaybackHistory, ReadOnlyTools
 from cineswarm_control import ControlPlane, ControlStore, Handler, LOCAL_ENV_KEYS, PlexConnector, Policy, ServiceError, service_error_message
-from cineswarm_discovery import DiscoveryEngine, is_boxset_title, is_junk_series_title, series_matches_tv_taste
+from cineswarm_discovery import DiscoveryEngine, is_boxset_title, is_junk_series_title, series_matches_tv_taste, series_titles_align
 from cineswarm_discord import DiscordService
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups, sync_offsite_vault
@@ -491,6 +491,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertFalse(is_junk_series_title("Rick and Morty"))
         self.assertTrue(series_matches_tv_taste(["Comedy", "Animation"]))
         self.assertFalse(series_matches_tv_taste(["News", "Reality"]))
+        self.assertTrue(series_titles_align("Archer", "Archer (2009)"))
+        self.assertTrue(series_titles_align("American Dad!", "American Dad"))
+        self.assertFalse(series_titles_align("Luanne Gets Lucky", "Wanna Marry"))
 
     def test_discovery_run_uses_taste_backend_without_gemini(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1183,6 +1186,17 @@ class WorkerTests(unittest.TestCase):
                         "year": 2013,
                         "titleSlug": "rick-and-morty",
                         "network": "Adult Swim",
+                        "originalLanguage": "eng",
+                    }]
+                if term == "Luanne Gets Lucky":
+                    return [{
+                        "title": "Wanna Marry",
+                        "tvdbId": 286383,
+                        "genres": ["Comedy"],
+                        "seriesType": "standard",
+                        "year": 2010,
+                        "network": "Egyptian Television Network",
+                        "originalLanguage": "ara",
                     }]
                 return []
             return []
@@ -1199,7 +1213,7 @@ class WorkerTests(unittest.TestCase):
         )
         worker.plane = SimpleNamespace(
             planner=SimpleNamespace(sonarr=SimpleNamespace(get=sonarr_get)),
-            library_brain=SimpleNamespace(watched_series_titles=lambda limit=40: ["Rick and Morty", "Futurama: The Complete Series Blu-Ray"]),
+            library_brain=SimpleNamespace(watched_series_titles=lambda limit=40: ["Luanne Gets Lucky", "Rick and Morty", "Futurama: The Complete Series Blu-Ray"]),
             discovery_queue=lambda: [],
             approve_task=lambda task_id, actor: {"result": {"id": 88 if task_id == "add-series" else 99}, "follow_up": {"task_id": "search-series"}},
         )
@@ -1656,13 +1670,14 @@ class LibraryBrainTests(unittest.TestCase):
         self.assertEqual(resolution_bucket(3840, 2160), "4K")
         self.assertEqual(credit_kind(0, None), "actor")
         self.assertEqual(credit_kind(1, "Director"), "director")
-        xml = ET.fromstring("""<MediaContainer><Video type="movie" ratingKey="1" title="Heat" year="1995" viewCount="3" lastViewedAt="1" duration="100000"><Genre tag="Crime"/><Guid id="tmdb://949"/></Video><Video type="episode" ratingKey="88" grandparentRatingKey="12" grandparentTitle="Futurama" title="Space Pilot 3000" year="1999" viewCount="6" lastViewedAt="1" duration="100000"><Genre tag="Animation"/></Video></MediaContainer>""")
+        xml = ET.fromstring("""<MediaContainer><Video type="movie" ratingKey="1" title="Heat" year="1995" viewCount="3" lastViewedAt="1" duration="100000"><Genre tag="Crime"/><Guid id="tmdb://949"/></Video><Video type="episode" ratingKey="88" grandparentRatingKey="12" grandparentTitle="Futurama" title="Space Pilot 3000" year="1999" viewCount="6" lastViewedAt="1" duration="100000"><Genre tag="Animation"/></Video><Video type="episode" ratingKey="89" title="Luanne Gets Lucky" year="1999" viewCount="2" lastViewedAt="1" duration="100000"/></MediaContainer>""")
         watched = watched_items_from_xml(xml)
         self.assertEqual(watched[0]["title"], "Heat")
         self.assertEqual(watched[0]["tmdb_id"], "949")
         self.assertEqual(watched[1]["title"], "Futurama")
         self.assertEqual(watched[1]["media_type"], "series")
         self.assertEqual(watched[1]["rating_key"], "12")
+        self.assertEqual(len(watched), 2)
 
     def test_enrich_indexes_files_people_and_collections(self):
         from cineswarm_library_brain import LibraryBrain

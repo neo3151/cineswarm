@@ -16,7 +16,7 @@ from typing import Any
 import urllib.request
 
 from cineswarm_control import CATALOG_DB, ControlStore, json_text, make_plane, redact
-from cineswarm_discovery import TV_GROWTH_TASTE_SEEDS, TV_GROWTH_PREFERRED_GENRES, is_boxset_title, is_junk_series_title, series_matches_tv_taste
+from cineswarm_discovery import TV_GROWTH_TASTE_SEEDS, TV_GROWTH_PREFERRED_GENRES, is_boxset_title, is_junk_series_title, series_matches_tv_taste, series_titles_align
 from cineswarm_preservation import configured_branches, csv_paths, database_maintenance, preservation_scan
 from cineswarm_sync import sync_catalog
 
@@ -426,7 +426,7 @@ class Worker:
                         queue_titles.append(str(candidate.get("title")))
             except Exception:
                 queue_titles = []
-        for title in [*watched, *TV_GROWTH_TASTE_SEEDS, *queue_titles]:
+        for title in [*TV_GROWTH_TASTE_SEEDS, *watched, *queue_titles]:
             clean = str(title or "").strip()
             key = clean.casefold()
             if not clean or key in seen or key in owned_titles or is_junk_series_title(clean):
@@ -446,11 +446,14 @@ class Worker:
             if not isinstance(match, dict) or not match.get("tvdbId"):
                 continue
             title = str(match.get("title") or "").strip()
-            if not title or is_junk_series_title(title):
+            if not title or is_junk_series_title(title) or not series_titles_align(term, title):
                 continue
             if match.get("tvdbId") in owned_tvdb or title.casefold() in owned_titles:
                 continue
             if str(match.get("seriesType") or "standard").lower() == "daily":
+                continue
+            language = str(match.get("originalLanguage") or match.get("language") or "eng").lower()
+            if language not in {"", "eng", "en", "english"}:
                 continue
             genres = match.get("genres") or []
             network = match.get("network") or match.get("studio")

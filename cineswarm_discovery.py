@@ -160,6 +160,23 @@ def series_matches_tv_taste(genres: Any = None, network: str | None = None, stud
     return any(token in blob for token in TV_GROWTH_PREFERRED_NETWORKS)
 
 
+def series_titles_align(term: str, title: str) -> bool:
+    """True when a Sonarr lookup is the same show we asked for, not a loose comedy hit."""
+    def normalize(value: str) -> str:
+        text = str(value or "").casefold()
+        text = re.sub(r"\s*\(\d{4}\)\s*$", "", text)
+        return re.sub(r"[^a-z0-9]+", "", text)
+
+    left = normalize(term)
+    right = normalize(title)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    return len(shorter) >= 8 and longer.startswith(shorter)
+
+
 def uses_taste_backend() -> bool:
     backend = (os.environ.get("CINESWARM_DISCOVERY_BACKEND") or os.environ.get("CINESWARM_MODEL_PROVIDER") or "gemini").strip().lower()
     return backend in {"taste", "local", "radarr", "catalog", "off", "none", "disabled"}

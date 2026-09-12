@@ -284,7 +284,9 @@ def watched_items_from_xml(root: ET.Element) -> list[dict[str, Any]]:
                 tmdb_id = guid_id.split("themoviedb://", 1)[-1].split("?")[0]
         genres = [genre.get("tag") for genre in node.findall("Genre") if genre.get("tag")]
         if node_type == "episode":
-            title = node.get("grandparentTitle") or node.get("title") or "Unknown"
+            title = node.get("grandparentTitle")
+            if not title:
+                continue
             rating_key = node.get("grandparentRatingKey") or node.get("ratingKey") or title
             media_type = "series"
             year = int(node.get("parentYear") or node.get("year")) if str(node.get("parentYear") or node.get("year") or "").isdigit() else None
