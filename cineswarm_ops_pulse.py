@@ -205,6 +205,30 @@ def classify_issues(metrics: dict[str, Any]) -> list[dict[str, Any]]:
             "series_path_missing": series_missing,
         })
 
+    if metrics.get("tv_growth_enabled"):
+        managed = _int(metrics.get("series_managed"))
+        target = max(1, _int(metrics.get("tv_growth_target"), 200))
+        remaining = max(0, target - managed)
+        incomplete = _int(metrics.get("series_incomplete"))
+        if managed >= target:
+            issues.append({
+                "code": "tv_growth_target_met",
+                "severity": "watch",
+                "summary": f"TV growth target met ({managed}/{target}). Turn off CINESWARM_TV_GROWTH so movie-first acquire stays the default.",
+                "managed": managed,
+                "target": target,
+            })
+        else:
+            issues.append({
+                "code": "tv_growth",
+                "severity": "watch",
+                "summary": f"Temporary TV growth {managed} → {target} ({remaining} series to go; {incomplete} already-managed shows still missing episodes). Turn off with CINESWARM_TV_GROWTH=false.",
+                "managed": managed,
+                "target": target,
+                "remaining": remaining,
+                "incomplete": incomplete,
+            })
+
     return issues
 
 
@@ -238,6 +262,10 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
         "last_acquire_decision": "",
         "skip_counts": {},
         "watch_titles": None,
+        "series_managed": 0,
+        "series_incomplete": 0,
+        "tv_growth_enabled": False,
+        "tv_growth_target": 200,
     }
 
     probe_timeout = float(__import__("os").environ.get("CINESWARM_PROBE_TIMEOUT", "5"))
@@ -326,6 +354,16 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
             metrics["watch_titles"] = _int(coverage.get("watch_titles"))
         except Exception:
             pass
+    if hasattr(plane, "tv_growth_status"):
+        try:
+            growth = plane.tv_growth_status() or {}
+            metrics["tv_growth_enabled"] = bool(growth.get("enabled"))
+            metrics["tv_growth_target"] = _int(growth.get("target"), 200)
+            metrics["series_managed"] = _int(growth.get("managed"))
+            metrics["series_incomplete"] = _int(growth.get("incomplete"))
+            metrics["series_missing_episodes"] = _int(growth.get("missing_episodes"))
+        except Exception:
+            pass
     return metrics
 
 
@@ -369,6 +407,10 @@ def run_ops_pulse(plane: Any, persist: bool = True) -> dict[str, Any]:
                 "watch_titles",
                 "av1_count",
                 "sab_error",
+                "series_managed",
+                "series_incomplete",
+                "tv_growth_enabled",
+                "tv_growth_target",
             )
         },
         "headline": (issues[0]["summary"] if issues else "No incoming household issues ranked above ok."),

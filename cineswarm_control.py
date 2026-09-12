@@ -90,7 +90,9 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_PRESERVATION_SAMPLE_LIMIT", "CINESWARM_PRESERVATION_CHECKSUM_BYTES", "CINESWARM_PRESERVATION_CHECKSUM_MAX_SIZE",
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
     "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
-    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+    "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN",
+    "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", "CINESWARM_WATCH_LEDGER_LIMIT", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+    "CINESWARM_TV_GROWTH", "CINESWARM_TV_GROWTH_TARGET", "CINESWARM_TV_GROWTH_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
 
@@ -1364,6 +1366,24 @@ class ControlStore:
             ).fetchone()
         return row is not None
 
+    def search_attempt_counts(self, task_type: str, media_type: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with self.lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM tasks WHERE task_type=? AND status IN ('completed','failed')",
+                (task_type,),
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            if payload.get("media_type") != media_type:
+                continue
+            service_id = payload.get("service_id")
+            if service_id in (None, ""):
+                continue
+            key = str(service_id)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
     def retry_cooldown_active(self, task_type: str, media_type: str, service_id: Any, cooldown: int) -> bool:
         cutoff = datetime.fromtimestamp(time.time() - max(0, cooldown), timezone.utc).isoformat(timespec="seconds")
         with self.lock, self._connect() as connection:
@@ -1828,6 +1848,46 @@ class ControlPlane:
             "recent": recent,
             "genre_counts": dict(genre_counts.most_common(8)),
             "added_since_days": added_since_days,
+        }
+
+    def tv_growth_status(self) -> dict[str, Any]:
+        """Read-only snapshot of the temporary TV-collection growth pass."""
+        enabled_raw = (self.store.get_policy("CINESWARM_TV_GROWTH") if hasattr(self.store, "get_policy") else None) or os.environ.get("CINESWARM_TV_GROWTH") or "false"
+        enabled = str(enabled_raw).lower() in {"1", "true", "yes", "on"}
+        try:
+            target = int((self.store.get_policy("CINESWARM_TV_GROWTH_TARGET") if hasattr(self.store, "get_policy") else None) or os.environ.get("CINESWARM_TV_GROWTH_TARGET") or 200)
+        except (TypeError, ValueError):
+            target = 200
+        target = max(1, min(target, 500))
+        snapshot = self.store.snapshot_payload("sonarr") if hasattr(self.store, "snapshot_payload") else {}
+        snapshot = snapshot or {}
+        items = snapshot.get("items") or []
+        counts = snapshot.get("counts") or {}
+        managed = len(items) if isinstance(items, list) and items else int(counts.get("all") or 0)
+        incomplete = 0
+        missing_episodes = 0
+        if isinstance(items, list):
+            for item in items:
+                stats = item.get("statistics") or {}
+                try:
+                    episode_count = int(stats.get("episodeCount") or 0)
+                    file_count = int(stats.get("episodeFileCount") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if episode_count and file_count < episode_count:
+                    incomplete += 1
+                    missing_episodes += episode_count - file_count
+        remaining = max(0, target - managed)
+        return {
+            "enabled": enabled,
+            "temporary": True,
+            "target": target,
+            "managed": managed,
+            "incomplete": incomplete,
+            "missing_episodes": missing_episodes,
+            "remaining": remaining,
+            "progress": f"{managed} → {target}",
+            "off_switch": "CINESWARM_TV_GROWTH=false",
         }
 
 

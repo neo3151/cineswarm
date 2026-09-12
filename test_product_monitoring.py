@@ -172,6 +172,41 @@ class IncomingIssuesClassifierTests(unittest.TestCase):
         self.assertEqual(issues, [])
         self.assertEqual(overall_severity(issues), "ok")
 
+    def test_tv_growth_progress_is_watch_only_and_reversible(self):
+        from cineswarm_ops_pulse import classify_issues
+        issues = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "without_file": 10,
+            "file_not_indexed": 2,
+            "never_imported": 3,
+            "watch_titles": 80,
+            "av1_count": 0,
+            "tv_growth_enabled": True,
+            "series_managed": 73,
+            "tv_growth_target": 200,
+            "series_incomplete": 11,
+        })
+        growth = next(issue for issue in issues if issue["code"] == "tv_growth")
+        self.assertEqual(growth["severity"], "watch")
+        self.assertIn("73 → 200", growth["summary"])
+        self.assertIn("CINESWARM_TV_GROWTH=false", growth["summary"])
+        off = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "without_file": 10,
+            "file_not_indexed": 2,
+            "never_imported": 3,
+            "watch_titles": 80,
+            "av1_count": 0,
+            "tv_growth_enabled": False,
+            "series_managed": 73,
+            "tv_growth_target": 200,
+        })
+        self.assertFalse(any(issue["code"].startswith("tv_growth") for issue in off))
+
 
 class DiscordMonitorCommandTests(unittest.TestCase):
     def test_monitor_command_formats_snapshot(self):

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from cineswarm_agents import AcquisitionPlanner, AgentError, HostedModelClient, PlaybackHistory, ReadOnlyTools
 from cineswarm_control import ControlPlane, ControlStore, Handler, LOCAL_ENV_KEYS, PlexConnector, Policy, ServiceError, service_error_message
-from cineswarm_discovery import DiscoveryEngine, is_boxset_title
+from cineswarm_discovery import DiscoveryEngine, is_boxset_title, is_junk_series_title, series_matches_tv_taste
 from cineswarm_discord import DiscordService
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups, sync_offsite_vault
@@ -486,6 +486,11 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(is_boxset_title("Some Show Box Set"))
         self.assertFalse(is_boxset_title("Kill Bill: Volume 1"))
         self.assertFalse(is_boxset_title("The Big Lebowski"))
+        self.assertTrue(is_junk_series_title("Futurama: The Complete Series Blu-Ray"))
+        self.assertTrue(is_junk_series_title("Family Guy Season Pack"))
+        self.assertFalse(is_junk_series_title("Rick and Morty"))
+        self.assertTrue(series_matches_tv_taste(["Comedy", "Animation"]))
+        self.assertFalse(series_matches_tv_taste(["News", "Reality"]))
 
     def test_discovery_run_uses_taste_backend_without_gemini(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -959,6 +964,57 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["acquired"], 2)
         self.assertEqual(len(result["acquisitions"]), 2)
 
+    def test_autonomous_job_reserves_one_slot_for_tv_growth_without_replacing_movies(self):
+        worker = Worker.__new__(Worker)
+        worker._check_storage = lambda: {"alerts": []}
+        worker._record_autopilot_decision = lambda decision, details: {"status": decision, **details}
+        policies = {
+            "CINESWARM_AUTO_ADD_SEARCH": "true",
+            "CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS": "2",
+            "CINESWARM_AUTO_MIN_SCORE": "70",
+            "CINESWARM_AUTO_ALLOWED_GENRES": "Action,Comedy",
+            "CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE": "HD-1080p",
+            "CINESWARM_AUTO_RECENT_YEARS": "2",
+            "CINESWARM_AUTO_RECENT_WEEKLY_TARGET": "0",
+            "CINESWARM_TV_GROWTH": "true",
+            "CINESWARM_TV_GROWTH_TARGET": "200",
+            "CINESWARM_TV_GROWTH_MAX_PER_CYCLE": "1",
+        }
+        worker.control_store = SimpleNamespace(
+            is_emergency_stop=lambda: False,
+            get_policy=lambda key: policies.get(key),
+            check_budget=lambda: (True, {"budget": {"movies_added": 0, "series_added": 0, "gb_added": 0}, "limits": {"gb": 200}}),
+            record_autonomous_action=lambda *args: "action",
+            create_task=lambda *args: "add-task",
+            increment_budget=lambda *args: None,
+            complete_autonomous_action=lambda action_id: None,
+            fail_autonomous_action=lambda action_id: None,
+            get_week_start=lambda: "2026-09-11",
+        )
+        worker.plane = SimpleNamespace(
+            planner=SimpleNamespace(
+                queue=lambda media_type: {"total_records": 0},
+                plan=lambda media_type, title: {"root_folders": [{"path": "/movies"}], "quality_profiles": [{"id": 1, "name": "HD-1080p"}]},
+                radarr=SimpleNamespace(get=lambda path: []),
+            ),
+            discovery=SimpleNamespace(
+                candidate=lambda candidate_id: {"candidate": {"title": f"Movie {candidate_id}", "year": 2024, "tmdbId": candidate_id, "genres": ["Comedy"], "runtime": 95}},
+                set_status=lambda *args: None,
+            ),
+            discovery_queue=lambda: [
+                {"id": 21, "media_type": "movie", "title": "Movie 21", "year": 2024, "score": 80, "status": "new"},
+                {"id": 22, "media_type": "movie", "title": "Movie 22", "year": 2023, "score": 79, "status": "new"},
+            ],
+            approve_task=lambda task_id, actor: {"result": {"id": 50}, "follow_up": {"task_id": "search-task"}},
+            never_imported_movies=lambda **kwargs: {"count": 0, "recent": []},
+        )
+        worker._tv_growth_pass = lambda limit=1: {"status": "executed", "added": [{"title": "Rick and Morty", "service_id": 9}], "searched": []}
+        worker._send_notification = lambda *args, **kwargs: True
+        with patch("cineswarm_worker.sync_catalog"):
+            result = worker.execute({"job_type": "autonomous_acquisition"})
+        self.assertEqual(result["acquired"], 1)
+        self.assertEqual(result["tv_growth"]["added"][0]["title"], "Rick and Morty")
+
     def test_reconcile_job_is_reachable(self):
         worker = Worker.__new__(Worker)
         worker.plane = SimpleNamespace(
@@ -1086,6 +1142,114 @@ class WorkerTests(unittest.TestCase):
         with patch.dict("os.environ", {"CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE": "2"}):
             result = worker._recover_never_imported()
         self.assertEqual([item["service_id"] for item in result["recovered"]], [9, 2])
+
+    def test_tv_growth_pass_stays_off_by_default(self):
+        worker = Worker.__new__(Worker)
+        worker.control_store = SimpleNamespace(get_policy=lambda key: None, is_emergency_stop=lambda: False)
+        worker.plane = SimpleNamespace(planner=SimpleNamespace(sonarr=SimpleNamespace(get=lambda *args, **kwargs: [])))
+        with patch.dict("os.environ", {"CINESWARM_TV_GROWTH": "false"}):
+            result = worker._tv_growth_pass(limit=2)
+        self.assertEqual(result["status"], "disabled")
+        self.assertEqual(result["added"], [])
+
+    def test_tv_growth_pass_adds_taste_series_and_rejects_junk(self):
+        worker = Worker.__new__(Worker)
+        calls = []
+
+        def sonarr_get(path, params=None):
+            if path == "api/v3/series":
+                return [{
+                    "id": 1,
+                    "title": "Futurama",
+                    "tvdbId": 73871,
+                    "monitored": True,
+                    "genres": ["Animation", "Comedy"],
+                    "statistics": {"episodeCount": 140, "episodeFileCount": 120},
+                }]
+            if path == "api/v3/rootfolder":
+                return [{"path": "/tv"}]
+            if path == "api/v3/qualityprofile":
+                return [{"id": 4, "name": "HD-1080p"}]
+            if path == "api/v3/series/lookup":
+                term = (params or {}).get("term", "")
+                if "Complete Series" in term or "Box Set" in term:
+                    return [{"title": term, "tvdbId": 999, "genres": ["Comedy"], "seriesType": "standard"}]
+                if term == "Rick and Morty":
+                    return [{
+                        "title": "Rick and Morty",
+                        "tvdbId": 275274,
+                        "genres": ["Animation", "Comedy"],
+                        "seriesType": "standard",
+                        "year": 2013,
+                        "titleSlug": "rick-and-morty",
+                        "network": "Adult Swim",
+                    }]
+                return []
+            return []
+
+        worker.control_store = SimpleNamespace(
+            get_policy=lambda key: {
+                "CINESWARM_TV_GROWTH": "true",
+                "CINESWARM_TV_GROWTH_TARGET": "200",
+                "CINESWARM_TV_GROWTH_MAX_PER_CYCLE": "1",
+                "CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE": "HD-1080p",
+            }.get(key),
+            is_emergency_stop=lambda: False,
+            create_task=lambda *args: calls.append(("task", *args)) or "add-series",
+        )
+        worker.plane = SimpleNamespace(
+            planner=SimpleNamespace(sonarr=SimpleNamespace(get=sonarr_get)),
+            library_brain=SimpleNamespace(watched_series_titles=lambda limit=40: ["Rick and Morty", "Futurama: The Complete Series Blu-Ray"]),
+            discovery_queue=lambda: [],
+            approve_task=lambda task_id, actor: {"result": {"id": 88 if task_id == "add-series" else 99}, "follow_up": {"task_id": "search-series"}},
+        )
+        worker._check_storage = lambda: {"alerts": []}
+        result = worker._tv_growth_pass(limit=1)
+        self.assertEqual(result["status"], "executed")
+        self.assertEqual(result["added"][0]["title"], "Rick and Morty")
+        self.assertEqual(result["added"][0]["service_id"], 88)
+        self.assertEqual(result["started_managed"], 1)
+        self.assertEqual(result["target"], 200)
+        self.assertTrue(any(item[1] == "sonarr_add_request" for item in calls if item[0] == "task"))
+
+    def test_tv_growth_pass_stops_at_target(self):
+        worker = Worker.__new__(Worker)
+        worker.control_store = SimpleNamespace(
+            get_policy=lambda key: {"CINESWARM_TV_GROWTH": "true", "CINESWARM_TV_GROWTH_TARGET": "2"}.get(key),
+            is_emergency_stop=lambda: False,
+        )
+        worker.plane = SimpleNamespace(
+            planner=SimpleNamespace(sonarr=SimpleNamespace(get=lambda path, params=None: [
+                {"id": 1, "title": "Futurama", "tvdbId": 1, "monitored": True, "statistics": {"episodeCount": 10, "episodeFileCount": 10}},
+                {"id": 2, "title": "Family Guy", "tvdbId": 2, "monitored": True, "statistics": {"episodeCount": 10, "episodeFileCount": 10}},
+            ] if path == "api/v3/series" else [])),
+        )
+        worker._check_storage = lambda: {"alerts": []}
+        result = worker._tv_growth_pass(limit=2)
+        self.assertEqual(result["status"], "target_reached")
+        self.assertEqual(result["added"], [])
+
+    def test_never_imported_recovery_skips_exhausted_titles(self):
+        worker = Worker.__new__(Worker)
+        store = FakeControlStore()
+        store.record_decision = lambda *args, **kwargs: "decision-gap"
+        store.update_decision = lambda *args, **kwargs: None
+        store.search_attempt_counts = lambda task_type, media_type: {"9": 3}
+        worker.control_store = store
+        worker.plane = SimpleNamespace(
+            never_imported_movies=lambda added_since_days=14, limit=20: {
+                "count": 2,
+                "recent": [
+                    {"title": "Drama Stub", "service_id": 2, "monitored": True, "added": "2026-09-01", "genres": ["Drama"]},
+                    {"title": "Muppets from Space", "service_id": 9, "monitored": True, "added": "2026-09-08", "genres": ["Comedy"]},
+                ],
+            },
+            approve_task=lambda task_id, actor: {"result": {"id": 77}},
+        )
+        with patch.dict("os.environ", {"CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE": "2", "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS": "3"}):
+            result = worker._recover_never_imported()
+        self.assertEqual([item["service_id"] for item in result["recovered"]], [2])
+        self.assertEqual(result["exhausted"][0]["service_id"], 9)
 
     def test_emergency_stop_blocks_failed_download_recovery(self):
         worker = Worker.__new__(Worker)
@@ -1256,6 +1420,11 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE",
             "CINESWARM_NEVER_IMPORTED_DAYS",
             "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN",
+            "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS",
+            "CINESWARM_WATCH_LEDGER_LIMIT",
+            "CINESWARM_TV_GROWTH",
+            "CINESWARM_TV_GROWTH_TARGET",
+            "CINESWARM_TV_GROWTH_MAX_PER_CYCLE",
             "CINESWARM_AUTO_ACQUIRE_PER_CYCLE",
             "CINESWARM_AUTO_NEAR_MISS_COOLDOWN",
             "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
@@ -1276,6 +1445,28 @@ class ConfigurationTests(unittest.TestCase):
             "CINESWARM_AUTO_ESTIMATED_MOVIE_GB",
         }
         self.assertTrue(expected <= LOCAL_ENV_KEYS)
+
+    def test_tv_growth_status_reads_sonarr_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ControlStore(os.path.join(directory, "control.db"))
+            store.save_snapshot("sonarr", {
+                "counts": {"all": 1},
+                "items": [{
+                    "title": "Futurama",
+                    "statistics": {"episodeCount": 10, "episodeFileCount": 4},
+                }],
+            })
+            store.set_policy("CINESWARM_TV_GROWTH", "true")
+            store.set_policy("CINESWARM_TV_GROWTH_TARGET", "200")
+            plane = ControlPlane(store, {})
+            status = plane.tv_growth_status()
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["temporary"])
+        self.assertEqual(status["managed"], 1)
+        self.assertEqual(status["incomplete"], 1)
+        self.assertEqual(status["missing_episodes"], 6)
+        self.assertEqual(status["progress"], "1 → 200")
+        self.assertEqual(status["off_switch"], "CINESWARM_TV_GROWTH=false")
 
 
 class MediaHealthTests(unittest.TestCase):
@@ -1465,10 +1656,13 @@ class LibraryBrainTests(unittest.TestCase):
         self.assertEqual(resolution_bucket(3840, 2160), "4K")
         self.assertEqual(credit_kind(0, None), "actor")
         self.assertEqual(credit_kind(1, "Director"), "director")
-        xml = ET.fromstring("""<MediaContainer><Video type="movie" ratingKey="1" title="Heat" year="1995" viewCount="3" lastViewedAt="1" duration="100000"><Genre tag="Crime"/><Guid id="tmdb://949"/></Video></MediaContainer>""")
+        xml = ET.fromstring("""<MediaContainer><Video type="movie" ratingKey="1" title="Heat" year="1995" viewCount="3" lastViewedAt="1" duration="100000"><Genre tag="Crime"/><Guid id="tmdb://949"/></Video><Video type="episode" ratingKey="88" grandparentRatingKey="12" grandparentTitle="Futurama" title="Space Pilot 3000" year="1999" viewCount="6" lastViewedAt="1" duration="100000"><Genre tag="Animation"/></Video></MediaContainer>""")
         watched = watched_items_from_xml(xml)
         self.assertEqual(watched[0]["title"], "Heat")
         self.assertEqual(watched[0]["tmdb_id"], "949")
+        self.assertEqual(watched[1]["title"], "Futurama")
+        self.assertEqual(watched[1]["media_type"], "series")
+        self.assertEqual(watched[1]["rating_key"], "12")
 
     def test_enrich_indexes_files_people_and_collections(self):
         from cineswarm_library_brain import LibraryBrain
@@ -1532,10 +1726,11 @@ class LibraryBrainTests(unittest.TestCase):
                 conn.executescript(CATALOG_SCHEMA)
             brain = LibraryBrain(catalog, control, radarr_db=os.path.join(directory, "no-radarr.db"), sonarr_db=os.path.join(directory, "no-sonarr.db"))
             history = SimpleNamespace(get_watched_items=lambda limit=200: ET.fromstring(
-                """<MediaContainer><Video type="movie" ratingKey="9" title="The Big Lebowski" year="1998" viewCount="4" lastViewedAt="1" duration="7000000"><Genre tag="Comedy"/></Video></MediaContainer>"""
+                """<MediaContainer><Video type="movie" ratingKey="9" title="The Big Lebowski" year="1998" viewCount="4" lastViewedAt="1" duration="7000000"><Genre tag="Comedy"/></Video><Video type="episode" ratingKey="88" grandparentRatingKey="12" grandparentTitle="Futurama" title="Space Pilot 3000" year="1999" viewCount="6" lastViewedAt="1" duration="1000000"><Genre tag="Animation"/></Video></MediaContainer>"""
             ))
             synced = brain.sync_watch_ledger(history)
-            self.assertEqual(synced["upserted"], 1)
+            self.assertEqual(synced["upserted"], 2)
+            self.assertEqual(brain.watched_series_titles(), ["Futurama"])
             brain.record_watch_event({
                 "event": "media.scrobble",
                 "Account": {"title": "neo"},

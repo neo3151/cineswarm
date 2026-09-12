@@ -16,7 +16,7 @@ from typing import Any
 import urllib.request
 
 from cineswarm_control import CATALOG_DB, ControlStore, json_text, make_plane, redact
-from cineswarm_discovery import is_boxset_title
+from cineswarm_discovery import TV_GROWTH_TASTE_SEEDS, TV_GROWTH_PREFERRED_GENRES, is_boxset_title, is_junk_series_title, series_matches_tv_taste
 from cineswarm_preservation import configured_branches, csv_paths, database_maintenance, preservation_scan
 from cineswarm_sync import sync_catalog
 
@@ -347,17 +347,26 @@ class Worker:
             reverse=True,
         )
         recovered = []
+        exhausted = []
         max_recover = max(0, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", 4), 8))
         if limit is not None:
             max_recover = max(0, min(max_recover, int(limit)))
         if max_recover == 0:
-            return {"count": int(gaps.get("count") or 0), "recovered": []}
+            return {"count": int(gaps.get("count") or 0), "recovered": [], "exhausted": []}
         search_cooldown = max(0, self._policy_int("CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN", 21600))
+        max_attempts = max(1, min(self._policy_int("CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", 3), 12))
+        attempt_counts = {}
+        if hasattr(self.control_store, "search_attempt_counts"):
+            attempt_counts = self.control_store.search_attempt_counts("radarr_search_request", "movie")
         for item in candidates:
             if is_boxset_title(item.get("title")):
                 continue
             service_id = item.get("service_id")
             if not service_id or not item.get("monitored"):
+                continue
+            prior_attempts = int(attempt_counts.get(str(service_id), 0))
+            if prior_attempts >= max_attempts:
+                exhausted.append({"service_id": service_id, "title": item.get("title"), "attempts": prior_attempts})
                 continue
             parent_task_id = f"never-imported:{service_id}"
             inflight = getattr(self.control_store, "task_inflight", None)
@@ -394,7 +403,239 @@ class Worker:
             recovered.append(task_result)
             if len(recovered) >= max_recover:
                 break
-        return {"count": int(gaps.get("count") or 0), "recovered": recovered}
+        return {"count": int(gaps.get("count") or 0), "recovered": recovered, "exhausted": exhausted}
+
+    def _tv_growth_enabled(self) -> bool:
+        return self._policy_bool("CINESWARM_TV_GROWTH")
+
+    def _tv_growth_terms(self, owned_titles: set[str]) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+        brain = getattr(self.plane, "library_brain", None)
+        watched = []
+        if brain is not None and hasattr(brain, "watched_series_titles"):
+            try:
+                watched = list(brain.watched_series_titles(limit=40) or [])
+            except Exception:
+                watched = []
+        queue_titles = []
+        if hasattr(self.plane, "discovery_queue"):
+            try:
+                for candidate in self.plane.discovery_queue() or []:
+                    if candidate.get("media_type") == "series" and candidate.get("title"):
+                        queue_titles.append(str(candidate.get("title")))
+            except Exception:
+                queue_titles = []
+        for title in [*watched, *TV_GROWTH_TASTE_SEEDS, *queue_titles]:
+            clean = str(title or "").strip()
+            key = clean.casefold()
+            if not clean or key in seen or key in owned_titles or is_junk_series_title(clean):
+                continue
+            seen.add(key)
+            terms.append(clean)
+        return terms
+
+    def _tv_growth_lookup(self, sonarr: Any, term: str, owned_tvdb: set[Any], owned_titles: set[str]) -> dict[str, Any] | None:
+        try:
+            matches = sonarr.get("api/v3/series/lookup", {"term": term})
+        except Exception:
+            return None
+        if not isinstance(matches, list):
+            return None
+        for match in matches:
+            if not isinstance(match, dict) or not match.get("tvdbId"):
+                continue
+            title = str(match.get("title") or "").strip()
+            if not title or is_junk_series_title(title):
+                continue
+            if match.get("tvdbId") in owned_tvdb or title.casefold() in owned_titles:
+                continue
+            if str(match.get("seriesType") or "standard").lower() == "daily":
+                continue
+            genres = match.get("genres") or []
+            network = match.get("network") or match.get("studio")
+            if not series_matches_tv_taste(genres, network=network, studio=match.get("studio")):
+                continue
+            year = match.get("year")
+            try:
+                if year and int(year) < 1987:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            candidate = {
+                key: match.get(key)
+                for key in (
+                    "tvdbId", "tmdbId", "imdbId", "title", "year", "overview", "genres",
+                    "status", "titleSlug", "seriesType", "seasons", "runtime", "studio", "network",
+                )
+                if key in match
+            }
+            return candidate
+        return None
+
+    def _tv_growth_pass(self, limit: int | None = None) -> dict[str, Any]:
+        """Temporary, bounded Sonarr growth toward CINESWARM_TV_GROWTH_TARGET. Does not invert movie-first acquire."""
+        target = max(1, min(self._policy_int("CINESWARM_TV_GROWTH_TARGET", 200), 500))
+        max_actions = max(0, min(self._policy_int("CINESWARM_TV_GROWTH_MAX_PER_CYCLE", 1), 2))
+        if limit is not None:
+            max_actions = max(0, min(max_actions, int(limit)))
+        empty = {"status": "disabled", "managed": 0, "target": target, "added": [], "searched": [], "skipped": []}
+        if not self._tv_growth_enabled():
+            return empty
+        if self._emergency_stop():
+            return {**empty, "status": "blocked_emergency_stop"}
+        if max_actions <= 0:
+            return {**empty, "status": "capped"}
+        sonarr = getattr(getattr(self.plane, "planner", None), "sonarr", None)
+        if sonarr is None:
+            return {**empty, "status": "sonarr_unavailable"}
+        try:
+            storage = self._check_storage()
+        except Exception as exc:
+            storage = {"alerts": [{"type": "storage_check_failed", "service": "sonarr", "error": str(exc)}]}
+        if any(
+            alert.get("service") == "sonarr" and alert.get("type") in {"low_space", "root_folder_unavailable", "storage_check_failed"}
+            for alert in (storage.get("alerts") or [])
+        ):
+            return {**empty, "status": "blocked_storage", "storage": storage}
+        try:
+            series = sonarr.get("api/v3/series")
+        except Exception as exc:
+            return {**empty, "status": "sonarr_error", "error": str(exc)}
+        if not isinstance(series, list):
+            series = []
+        managed = len(series)
+        owned_tvdb = {item.get("tvdbId") for item in series if item.get("tvdbId")}
+        owned_titles = {str(item.get("title") or "").strip().casefold() for item in series}
+        if managed >= target:
+            return {**empty, "status": "target_reached", "managed": managed}
+        required_profile = self._policy("CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE", "HD-1080p")
+        try:
+            roots = sonarr.get("api/v3/rootfolder") or []
+            profiles = sonarr.get("api/v3/qualityprofile") or []
+        except Exception as exc:
+            return {**empty, "status": "sonarr_error", "error": str(exc), "managed": managed}
+        profile = next((item for item in profiles if isinstance(item, dict) and item.get("name") == required_profile), None)
+        root_path = next((item.get("path") for item in roots if isinstance(item, dict) and item.get("path")), None)
+        if not profile or not root_path:
+            return {**empty, "status": "missing_profile_or_root", "managed": managed}
+
+        added: list[dict[str, Any]] = []
+        searched: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        remaining = max_actions
+
+        incomplete: list[tuple[bool, int, dict[str, Any]]] = []
+        for item in series:
+            if not item.get("monitored"):
+                continue
+            stats = item.get("statistics") or {}
+            try:
+                episode_count = int(stats.get("episodeCount") or 0)
+                file_count = int(stats.get("episodeFileCount") or 0)
+            except (TypeError, ValueError):
+                continue
+            if episode_count and file_count < episode_count:
+                genres = {str(genre).lower() for genre in (item.get("genres") or [])}
+                incomplete.append((bool(genres & TV_GROWTH_PREFERRED_GENRES), episode_count - file_count, item))
+        incomplete.sort(key=lambda row: (not row[0], -row[1]))
+
+        if remaining >= 2 and incomplete:
+            item = incomplete[0][2]
+            try:
+                search_task_id = self.control_store.create_task(
+                    "sonarr_search_request",
+                    "autonomous",
+                    {
+                        "media_type": "series",
+                        "service_id": item.get("id"),
+                        "reason": "Temporary TV growth: fill missing episodes on an already-managed series.",
+                    },
+                )
+                search_result = self.plane.approve_task(search_task_id, "autonomous-worker")
+                searched.append({
+                    "service_id": item.get("id"),
+                    "title": item.get("title"),
+                    "task_id": search_task_id,
+                    "command_id": (search_result.get("result") or {}).get("id"),
+                    "missing_episodes": incomplete[0][1],
+                })
+                remaining -= 1
+            except Exception as exc:
+                skipped.append(f"search:{item.get('title')}:{exc}")
+
+        for term in self._tv_growth_terms(owned_titles):
+            if remaining <= 0 or managed + len(added) >= target:
+                break
+            candidate = self._tv_growth_lookup(sonarr, term, owned_tvdb, owned_titles)
+            if not candidate:
+                skipped.append(f"lookup:{term}")
+                continue
+            add_payload = {
+                "media_type": "series",
+                "candidate": candidate,
+                "root_folder_path": root_path,
+                "quality_profile_id": profile["id"],
+            }
+            try:
+                add_task_id = self.control_store.create_task("sonarr_add_request", "autonomous", add_payload)
+                add_result = self.plane.approve_task(add_task_id, "autonomous-worker")
+                service_id = (add_result.get("result") or {}).get("id")
+                follow_up = add_result.get("follow_up") or {}
+                search_task_id = follow_up.get("task_id")
+                command_id = None
+                if search_task_id:
+                    search_result = self.plane.approve_task(search_task_id, "autonomous-worker")
+                    command_id = (search_result.get("result") or {}).get("id")
+                added.append({
+                    "title": candidate.get("title"),
+                    "tvdbId": candidate.get("tvdbId"),
+                    "service_id": service_id,
+                    "add_task_id": add_task_id,
+                    "search_task_id": search_task_id,
+                    "command_id": command_id,
+                    "term": term,
+                })
+                owned_tvdb.add(candidate.get("tvdbId"))
+                owned_titles.add(str(candidate.get("title") or "").casefold())
+                remaining -= 1
+            except Exception as exc:
+                skipped.append(f"add:{candidate.get('title')}:{exc}")
+
+        if remaining > 0 and not added and incomplete and not searched:
+            item = incomplete[0][2]
+            try:
+                search_task_id = self.control_store.create_task(
+                    "sonarr_search_request",
+                    "autonomous",
+                    {
+                        "media_type": "series",
+                        "service_id": item.get("id"),
+                        "reason": "Temporary TV growth: no new taste series this cycle; search missing episodes instead.",
+                    },
+                )
+                search_result = self.plane.approve_task(search_task_id, "autonomous-worker")
+                searched.append({
+                    "service_id": item.get("id"),
+                    "title": item.get("title"),
+                    "task_id": search_task_id,
+                    "command_id": (search_result.get("result") or {}).get("id"),
+                    "missing_episodes": incomplete[0][1],
+                })
+            except Exception as exc:
+                skipped.append(f"search:{item.get('title')}:{exc}")
+
+        status = "executed" if added or searched else "no_eligible_series"
+        return {
+            "status": status,
+            "managed": managed + len(added),
+            "started_managed": managed,
+            "target": target,
+            "progress": f"{managed + len(added)} → {target}",
+            "added": added,
+            "searched": searched,
+            "skipped": skipped[:12],
+        }
 
     def _auto_refresh_allowed(self) -> bool:
         return self._policy_bool("CINESWARM_AUTO_PLEX_REFRESH")
@@ -712,6 +953,10 @@ class Worker:
             affinity_floor = self._policy_int("CINESWARM_AUTO_NEAR_MISS_AFFINITY_FLOOR", 35)
             free_slots = max(0, int(pressure.get("limit") or 4) - int(pressure.get("active") or 0))
             acquire_cap = max(1, min(self._policy_int("CINESWARM_AUTO_ACQUIRE_PER_CYCLE", free_slots or 1), free_slots or 1, 8))
+            tv_max = max(0, min(self._policy_int("CINESWARM_TV_GROWTH_MAX_PER_CYCLE", 1), 2)) if self._tv_growth_enabled() else 0
+            tv_reserved = 1 if tv_max and free_slots >= 2 else 0
+            if tv_reserved:
+                acquire_cap = max(1, acquire_cap - tv_reserved)
             allowed_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_ALLOWED_GENRES").split(",") if genre.strip()}
             forbidden_genres = {genre.strip().lower() for genre in self._policy("CINESWARM_AUTO_FORBIDDEN_GENRES").split(",") if genre.strip()}
             required_profile = self._policy("CINESWARM_AUTO_REQUIRED_QUALITY_PROFILE", "HD-1080p")
@@ -861,7 +1106,15 @@ class Worker:
                     if result:
                         acquired.append(result)
 
-            leftover = max(0, acquire_cap - len(acquired))
+            leftover = max(0, acquire_cap + tv_reserved - len(acquired))
+            tv_growth: dict[str, Any] = {"status": "disabled", "added": [], "searched": []}
+            if leftover and tv_max:
+                try:
+                    tv_growth = self._tv_growth_pass(limit=min(tv_max, leftover))
+                except Exception as exc:
+                    tv_growth = {"status": "error", "error": str(exc), "added": [], "searched": []}
+                leftover = max(0, leftover - len(tv_growth.get("added") or []) - len(tv_growth.get("searched") or []))
+
             never_imported: dict[str, Any] = {"count": 0, "recovered": []}
             if leftover and self._policy_bool("CINESWARM_FULL_AUTOPILOT") and hasattr(self.plane, "never_imported_movies"):
                 never_imported = self._recover_never_imported(limit=leftover)
@@ -873,14 +1126,30 @@ class Worker:
                     "acquisitions": acquired,
                     "acquired": len(acquired),
                     "never_imported": never_imported,
+                    "tv_growth": tv_growth,
                     "skip_counts": skip_counts,
                 }
                 return payload
+
+            if tv_growth.get("added") or tv_growth.get("searched"):
+                title = None
+                if tv_growth.get("added"):
+                    title = tv_growth["added"][-1].get("title")
+                elif tv_growth.get("searched"):
+                    title = tv_growth["searched"][-1].get("title")
+                return self._record_autopilot_decision("executed_tv_growth", {
+                    "acquired": 0,
+                    "title": title,
+                    "tv_growth": tv_growth,
+                    "never_imported": never_imported,
+                    "skip_counts": skip_counts,
+                })
 
             if never_imported.get("recovered"):
                 return self._record_autopilot_decision("executed_never_imported_fill", {
                     "acquired": 0,
                     "never_imported": never_imported,
+                    "tv_growth": tv_growth,
                     "skip_counts": skip_counts,
                 })
 
@@ -893,6 +1162,7 @@ class Worker:
                 "skip_counts": skip_counts,
                 "near_misses": near_misses[:5],
                 "never_imported": never_imported,
+                "tv_growth": tv_growth,
             })
         if job_type == "failed_download_recovery":
             if self._emergency_stop():

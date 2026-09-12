@@ -255,7 +255,30 @@ class PlaybackHistory:
             raise AgentError(f"Plex playback history request failed: {exc.__class__.__name__}") from exc
 
     def get_watched_items(self, limit: int = 200) -> ET.Element:
-        return self._get("library/all", {"sort": "lastViewedAt:desc", "viewCount>>": 0, "X-Plex-Container-Start": 0, "X-Plex-Container-Size": limit, "includeGuids": 1})
+        """Return watched movies, shows, and episodes, paging through Plex history."""
+        merged = ET.Element("MediaContainer")
+        page_size = min(100, max(1, int(limit)))
+        start = 0
+        while start < limit:
+            chunk = self._get(
+                "library/all",
+                {
+                    "sort": "lastViewedAt:desc",
+                    "viewCount>>": 0,
+                    "X-Plex-Container-Start": start,
+                    "X-Plex-Container-Size": min(page_size, limit - start),
+                    "includeGuids": 1,
+                },
+            )
+            nodes = [node for node in list(chunk) if node.tag in {"Video", "Directory"}]
+            if not nodes:
+                break
+            for node in nodes:
+                merged.append(node)
+            if len(nodes) < page_size:
+                break
+            start += page_size
+        return merged
 
     def build_taste_profile(self) -> dict[str, Any]:
         # Get watched items
@@ -269,7 +292,7 @@ class PlaybackHistory:
         recent_activity = []
 
         for item in watched:
-            if item.tag not in ("Video", "Directory") or item.get("type") not in ("movie", "show"):
+            if item.tag not in ("Video", "Directory") or item.get("type") not in ("movie", "show", "episode"):
                 continue
             play_count = int(item.get("viewCount") or 1)
 
@@ -314,7 +337,7 @@ class PlaybackHistory:
                 year_distribution[year] += weight
 
             recent_activity.append({
-                "title": item.get("title"),
+                "title": item.get("grandparentTitle") or item.get("title") if item.get("type") == "episode" else item.get("title"),
                 "type": "Movie" if item.get("type") == "movie" else "Series",
                 "year": year,
                 "play_count": play_count,

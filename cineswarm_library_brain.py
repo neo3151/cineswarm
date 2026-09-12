@@ -262,7 +262,8 @@ def credit_kind(credit_type: int, job: str | None) -> str | None:
 def watched_items_from_xml(root: ET.Element) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for node in root:
-        if node.tag not in ("Video", "Directory") or node.get("type") not in ("movie", "show"):
+        node_type = node.get("type")
+        if node.tag not in ("Video", "Directory") or node_type not in ("movie", "show", "episode"):
             continue
         last_viewed = int(node.get("lastViewedAt") or 0)
         duration_ms = int(node.get("duration") or 0)
@@ -282,11 +283,21 @@ def watched_items_from_xml(root: ET.Element) -> list[dict[str, Any]]:
             if "themoviedb://" in guid_id:
                 tmdb_id = guid_id.split("themoviedb://", 1)[-1].split("?")[0]
         genres = [genre.get("tag") for genre in node.findall("Genre") if genre.get("tag")]
+        if node_type == "episode":
+            title = node.get("grandparentTitle") or node.get("title") or "Unknown"
+            rating_key = node.get("grandparentRatingKey") or node.get("ratingKey") or title
+            media_type = "series"
+            year = int(node.get("parentYear") or node.get("year")) if str(node.get("parentYear") or node.get("year") or "").isdigit() else None
+        else:
+            title = node.get("title") or "Unknown"
+            rating_key = node.get("ratingKey") or title
+            media_type = "movie" if node_type == "movie" else "series"
+            year = int(node.get("year")) if str(node.get("year") or "").isdigit() else None
         items.append({
-            "rating_key": node.get("ratingKey") or node.get("title") or "",
-            "title": node.get("title") or "Unknown",
-            "year": int(node.get("year")) if str(node.get("year") or "").isdigit() else None,
-            "media_type": "movie" if node.get("type") == "movie" else "series",
+            "rating_key": rating_key,
+            "title": title,
+            "year": year,
+            "media_type": media_type,
             "view_count": int(node.get("viewCount") or 1),
             "last_viewed_at": datetime.fromtimestamp(last_viewed, timezone.utc).isoformat(timespec="seconds") if last_viewed else None,
             "view_offset_ms": offset_ms or None,
@@ -628,8 +639,9 @@ class LibraryBrain:
         return {"status": "ok", "files": files_written}
 
     def sync_watch_ledger(self, playback_history: Any, plex_account: str = "household") -> dict[str, Any]:
+        limit = max(100, min(int(os.environ.get("CINESWARM_WATCH_LEDGER_LIMIT", "2000") or 2000), 5000))
         try:
-            root = playback_history.get_watched_items(limit=500)
+            root = playback_history.get_watched_items(limit=limit)
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
         items = watched_items_from_xml(root)
@@ -641,7 +653,37 @@ class LibraryBrain:
                 self._upsert_watch(conn, plex_account=plex_account, item=item)
                 upserted += 1
             conn.commit()
-        return {"status": "ok", "upserted": upserted}
+        return {"status": "ok", "upserted": upserted, "limit": limit}
+
+    def watched_series_titles(self, limit: int = 40) -> list[str]:
+        """Distinct series titles from the durable Plex watch ledger, most-watched first."""
+        if not os.path.exists(self.control_db):
+            return []
+        titles: list[str] = []
+        seen: set[str] = set()
+        with sqlite3.connect(self.control_db) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "library_watch_ledger" not in tables:
+                return []
+            rows = conn.execute(
+                """
+                SELECT title, SUM(view_count) AS plays
+                FROM library_watch_ledger
+                WHERE media_type='series' AND title IS NOT NULL AND title!=''
+                GROUP BY title
+                ORDER BY plays DESC, MAX(last_viewed_at) DESC
+                """
+            ).fetchall()
+        for title, _plays in rows:
+            clean = str(title or "").strip()
+            key = clean.casefold()
+            if not clean or key in seen:
+                continue
+            seen.add(key)
+            titles.append(clean)
+            if len(titles) >= max(1, min(int(limit), 80)):
+                break
+        return titles
 
     def record_watch_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         metadata = payload.get("Metadata") or {}

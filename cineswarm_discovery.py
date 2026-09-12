@@ -67,6 +67,99 @@ def is_boxset_title(title: str | None) -> bool:
     return bool(BOXSET_TITLE_RE.search(str(title or "")))
 
 
+JUNK_SERIES_TITLE_RE = re.compile(
+    r"\b(complete\s+collection|blu-?ray|dvd(\s+set)?|season\s+pack|the\s+complete\s+series|discography)\b",
+    re.I,
+)
+
+TV_GROWTH_PREFERRED_GENRES = {"comedy", "animation", "sitcom"}
+TV_GROWTH_PREFERRED_NETWORKS = (
+    "adult swim",
+    "cartoon network",
+    "comedy central",
+    "fox",
+    "fxx",
+    "fx",
+)
+TV_GROWTH_TASTE_SEEDS = (
+    "Rick and Morty",
+    "American Dad!",
+    "King of the Hill",
+    "Bob's Burgers",
+    "The Simpsons",
+    "South Park",
+    "Archer",
+    "Solar Opposites",
+    "Robot Chicken",
+    "Aqua Teen Hunger Force",
+    "The Venture Bros.",
+    "Home Movies",
+    "Metalocalypse",
+    "Harvey Birdman, Attorney at Law",
+    "Squidbillies",
+    "Moral Orel",
+    "Superjail!",
+    "Sealab 2021",
+    "The Boondocks",
+    "Mike Tyson Mysteries",
+    "Smiling Friends",
+    "Primal",
+    "Harley Quinn",
+    "Invincible",
+    "BoJack Horseman",
+    "F Is for Family",
+    "Disenchantment",
+    "Close Enough",
+    "Tuca & Bertie",
+    "Clone High",
+    "Daria",
+    "Beavis and Butt-Head",
+    "It's Always Sunny in Philadelphia",
+    "Community",
+    "Parks and Recreation",
+    "What We Do in the Shadows",
+    "Atlanta",
+    "Barry",
+    "Curb Your Enthusiasm",
+    "Arrested Development",
+    "30 Rock",
+    "Veep",
+    "Silicon Valley",
+    "Workaholics",
+    "Broad City",
+    "I Think You Should Leave with Tim Robinson",
+    "Trailer Park Boys",
+    "The League",
+    "Eastbound & Down",
+    "Abbott Elementary",
+    "Hacks",
+    "The Good Place",
+    "Schitt's Creek",
+    "Brooklyn Nine-Nine",
+    "The Office",
+    "Mythic Quest",
+    "Reservation Dogs",
+    "Joe Pera Talks With You",
+    "The Cleveland Show",
+    "Futurama",
+    "Family Guy",
+)
+
+
+def is_junk_series_title(title: str | None) -> bool:
+    """True for disc/box-set/complete-collection listings that should not be added as series."""
+    text = str(title or "")
+    return is_boxset_title(text) or bool(JUNK_SERIES_TITLE_RE.search(text))
+
+
+def series_matches_tv_taste(genres: Any = None, network: str | None = None, studio: str | None = None) -> bool:
+    names = {str(genre).strip().lower() for genre in (genres or []) if genre}
+    if names & TV_GROWTH_PREFERRED_GENRES:
+        return True
+    blob = f"{network or ''} {studio or ''}".lower()
+    return any(token in blob for token in TV_GROWTH_PREFERRED_NETWORKS)
+
+
 def uses_taste_backend() -> bool:
     backend = (os.environ.get("CINESWARM_DISCOVERY_BACKEND") or os.environ.get("CINESWARM_MODEL_PROVIDER") or "gemini").strip().lower()
     return backend in {"taste", "local", "radarr", "catalog", "off", "none", "disabled"}
