@@ -12,7 +12,7 @@
 | Plex | Playback library and watch-history source | Healthy |
 | Radarr | Movie management, search, grabs, and imports | Healthy |
 | Sonarr | Series management and queue visibility | Healthy |
-| Gemini | Optional chat/discovery model | Paused (`CINESWARM_MODEL_PROVIDER=taste`) |
+| Gemini | Optional chat/discovery model | Active (`CINESWARM_MODEL_PROVIDER=gemini`; taste tops up on failure) |
 | CineSwarm dashboard | LAN operations console | Active |
 | CineSwarm worker | Scheduled maintenance and autonomous movie acquisition | Active |
 | CineSwarm Discord bot | Private chat and approval interface | Active |
@@ -146,7 +146,7 @@ Examples:
 !cine are Plex, Radarr, and Sonarr healthy?
 ```
 
-Responses use the local library brain first: catalog, Radarr file specs, credits, collections, Plex watch ledger, service snapshots, and reconciliation counts. Gemini is optional and currently off (`CINESWARM_MODEL_PROVIDER=taste`). Conversational chat cannot silently add, search, grab, delete, or modify media.
+Responses use the local library brain first: catalog, Radarr file specs, credits, collections, Plex watch ledger, service snapshots, and reconciliation counts. Gemini is optional and currently on (`CINESWARM_MODEL_PROVIDER=gemini`); chat falls back to the library brain if the model is unavailable. Conversational chat cannot silently add, search, grab, delete, or modify media.
 
 Read-only library maps:
 
@@ -289,7 +289,7 @@ CineSwarm returns up to ten missing candidates with a durable candidate ID, rele
 !cine discover refresh
 ```
 
-This runs watch-taste discovery now (Radarr lookups of watched directors, titles, and genres), discards existing titles and box-set discs, stores verified candidates, and returns the refreshed queue. Gemini is skipped while `CINESWARM_MODEL_PROVIDER=taste`.
+This runs Gemini discovery now, then tops up from watch-taste Radarr lookups if Gemini returns too few titles. It discards existing titles and box-set discs, stores verified candidates, and returns the refreshed queue. Set `CINESWARM_MODEL_PROVIDER=taste` to skip Gemini.
 
 ### Acquire a discovery candidate
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Collection-aware discovery queue with Radarr/Sonarr validation.
 
-Default path is watch-taste Radarr lookups. Gemini stays optional behind
-CINESWARM_MODEL_PROVIDER=gemini when a working key exists.
+Default path is Gemini when CINESWARM_MODEL_PROVIDER=gemini. Watch-taste
+Radarr lookups top up the queue if Gemini is unset, denied, or thin.
 """
 
 from __future__ import annotations

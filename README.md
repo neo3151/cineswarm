@@ -60,19 +60,19 @@ Service credentials are only read into process memory and are never written to s
 
 `cineswarm_agents.py` adds librarian, curator, health, and request specialists behind a supervisor. The dashboard now includes `POST /api/chat`, which answers from the local library brain (files, people, collections, watch ledger) when no hosted model is configured. `GET /api/library/portrait` is the compact household map.
 
-Discovery defaults to watch-taste Radarr lookups (`CINESWARM_MODEL_PROVIDER=taste` or `CINESWARM_DISCOVERY_BACKEND=taste`). That path uses Plex watch history plus Radarr title/director/genre lookups and never calls Gemini. Set the provider back to `gemini` only when a working AI Studio project is available:
+Discovery uses Gemini first (`CINESWARM_MODEL_PROVIDER=gemini`). If Gemini is unset, denied, or returns too few titles, the worker tops up from watch-taste Radarr lookups. Set both to `taste` only to skip Gemini entirely:
 
 ```dotenv
-CINESWARM_MODEL_PROVIDER=taste
-CINESWARM_DISCOVERY_BACKEND=taste
+CINESWARM_MODEL_PROVIDER=gemini
+CINESWARM_DISCOVERY_BACKEND=gemini
 CINESWARM_MODEL_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 CINESWARM_MODEL_API_KEY=
 CINESWARM_MODEL_NAME=gemini-2.5-flash
-CINESWARM_MODEL_FALLBACKS=gemini-2.0-flash,gemini-2.5-flash-lite
+CINESWARM_MODEL_FALLBACKS=gemini-3.5-flash,gemini-3.5-flash-lite
 CINESWARM_MODEL_TIMEOUT=30
 ```
 
-`GEMINI_API_KEY` or `GOOGLE_API_KEY` can be used instead of `CINESWARM_MODEL_API_KEY`, and `GEMINI_MODEL` can be used instead of `CINESWARM_MODEL_NAME`. If Gemini is enabled, discovery retries 503/429, then tries the native Gemini endpoint and fallback model names before topping up from Radarr taste lookups.
+`GEMINI_API_KEY` or `GOOGLE_API_KEY` can be used instead of `CINESWARM_MODEL_API_KEY`, and `GEMINI_MODEL` can be used instead of `CINESWARM_MODEL_NAME`. Discovery retries 503/429, then tries the native Gemini endpoint and fallback model names before topping up from Radarr taste lookups.
 
 This phase can analyze, recommend, and propose plans. It cannot change Plex, Radarr, Sonarr, files, downloads, users, or settings. Write-capable agents must be added to `Policy` with explicit scopes, approval records, and audit coverage before they are enabled.
 

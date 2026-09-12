@@ -106,7 +106,7 @@ class HostedModelClient:
         return bool(self.api_key)
 
     def _model_candidates(self) -> list[str]:
-        fallbacks = [item.strip() for item in os.environ.get("CINESWARM_MODEL_FALLBACKS", "gemini-2.0-flash,gemini-2.5-flash-lite").split(",") if item.strip()]
+        fallbacks = [item.strip() for item in os.environ.get("CINESWARM_MODEL_FALLBACKS", "gemini-3.5-flash,gemini-3.5-flash-lite").split(",") if item.strip()]
         models: list[str] = []
         for name in [self.model, *fallbacks]:
             if name and name not in models:
