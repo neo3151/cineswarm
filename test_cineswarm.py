@@ -176,7 +176,7 @@ class AcquisitionPlannerTests(unittest.TestCase):
         class MonitorClient:
             def get(self, path, params=None):
                 if path == "api/v3/command/9":
-                    return {"status": "completed", "result": "No releases found"}
+                    return {"status": "completed", "result": "successful", "message": "Completed search for 1 movies. 0 reports downloaded."}
                 if path == "api/v3/movie/42":
                     return {"id": 42, "title": "Unavailable", "hasFile": False}
                 if path == "api/v3/queue":
@@ -189,7 +189,7 @@ class AcquisitionPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(result["state"], "search_no_release")
-        self.assertEqual(result["outcome_reason"], "No releases found")
+        self.assertEqual(result["outcome_reason"], "Completed search for 1 movies. 0 reports downloaded.")
 
     def test_monitor_search_classifies_import_blocked_queue_item(self):
         class MonitorClient:

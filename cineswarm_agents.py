@@ -658,7 +658,8 @@ class AcquisitionPlanner:
         error_message = str((queue_item or {}).get("errorMessage") or command.get("errorMessage") or "")
         warning_message = str((queue_item or {}).get("warningMessage") or command.get("warningMessage") or "")
         command_result = command.get("result")
-        result_text = " ".join(str(value) for value in (command_result, command.get("message"), error_message, warning_message) if value).casefold()
+        command_message = str(command.get("message") or "")
+        result_text = " ".join(str(value) for value in (command_result, command_message, error_message, warning_message) if value).casefold()
         failed_statuses = {"failed", "warning", "importfailed", "importfailedpathdoesnotexist"}
         import_blocked_states = {"importblocked", "importpending", "importfailed", "importfaileddestination"}
         if command_status not in ("completed", "failed"):
@@ -680,9 +681,9 @@ class AcquisitionPlanner:
             state = "download_active"
             outcome_reason = tracked_state or queue_status or "download_queued"
         elif media_type == "movie":
-            if any(marker in result_text for marker in ("no release", "no releases", "no eligible", "no files found", "no files were found", "indexers returned no")):
+            if any(marker in result_text for marker in ("no release", "no releases", "no eligible", "no files found", "no files were found", "indexers returned no", "0 reports downloaded")):
                 state = "search_no_release"
-                outcome_reason = command_result or "no_release_found"
+                outcome_reason = command_message or command_result or "no_release_found"
             elif any(marker in result_text for marker in ("rejected", "quality cutoff", "warning")):
                 state = "search_rejected"
                 outcome_reason = command_result or warning_message or "release_rejected"
@@ -697,7 +698,7 @@ class AcquisitionPlanner:
             else:
                 state = "search_completed_no_episodes"
                 outcome_reason = "no_episode_files"
-        return {"state": state, "outcome_reason": outcome_reason, "media_type": media_type, "service_id": service_id, "command_id": command_id, "command_status": command.get("status"), "command_result": command_result, "title": item.get("title"), "has_file": item.get("hasFile"), "statistics": item.get("statistics"), "queue_status": queue_item.get("status") if queue_item else None, "tracked_download_state": queue_item.get("trackedDownloadState") if queue_item else None, "error_message": error_message or None, "warning_message": warning_message or None}
+        return {"state": state, "outcome_reason": outcome_reason, "media_type": media_type, "service_id": service_id, "command_id": command_id, "command_status": command.get("status"), "command_result": command_result, "command_message": command_message or None, "title": item.get("title"), "has_file": item.get("hasFile"), "statistics": item.get("statistics"), "queue_status": queue_item.get("status") if queue_item else None, "tracked_download_state": queue_item.get("trackedDownloadState") if queue_item else None, "error_message": error_message or None, "warning_message": warning_message or None}
 
     def get_failed_downloads(self, media_type: str = "movie") -> list[dict[str, Any]]:
         """Get list of items with failed downloads from queue."""
