@@ -169,6 +169,21 @@ class WorkerStore:
             connection.commit()
             return connection.execute("SELECT * FROM worker_jobs WHERE job_id=?", (row["job_id"],)).fetchone()
 
+    def recover_orphaned_jobs(self) -> int:
+        timestamp = utc_epoch()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE worker_jobs
+                SET status='retry', available_at=?, locked_by=NULL, locked_until=NULL,
+                    last_error=COALESCE(last_error, 'Recovered from an abandoned worker lease'),
+                    updated_at=?
+                WHERE status='running' AND locked_by IS NOT NULL AND locked_by<>?
+                """,
+                (timestamp, timestamp, WORKER_ID),
+            )
+            return cursor.rowcount
+
     def complete(self, job_id: str) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -1363,6 +1378,7 @@ class Worker:
 
     def run_once(self) -> dict[str, Any]:
         self.store.ensure_schedules(self.schedules)
+        self.store.recover_orphaned_jobs()
         self.store.enqueue_due_schedules()
         job = self.store.claim()
         if not job:

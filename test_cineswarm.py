@@ -847,6 +847,27 @@ class WorkerTests(unittest.TestCase):
 
         self.assertEqual(tuple(row), ("completed", None))
 
+    def test_worker_store_recovers_orphaned_running_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkerStore(f"{directory}/worker.db")
+            with store.connect() as connection:
+                connection.execute(
+                    "INSERT INTO worker_jobs (job_id, job_type, status, available_at, locked_by, locked_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("orphan", "autonomous_acquisition", "running", 0, "old-worker", utc_epoch() + 900, utc_epoch(), utc_epoch()),
+                )
+
+            self.assertEqual(store.recover_orphaned_jobs(), 1)
+
+            with store.connect() as connection:
+                row = connection.execute(
+                    "SELECT status, locked_by, locked_until, last_error FROM worker_jobs WHERE job_id='orphan'"
+                ).fetchone()
+
+        self.assertEqual(row["status"], "retry")
+        self.assertIsNone(row["locked_by"])
+        self.assertIsNone(row["locked_until"])
+        self.assertIn("abandoned worker lease", row["last_error"])
+
     def test_legacy_schedule_timestamp_is_reactivated(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkerStore(f"{directory}/worker.db")
