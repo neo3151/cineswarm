@@ -721,6 +721,24 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(result["summary"], {"monitor_unavailable": 1})
         self.assertEqual(saved[0][1], "monitor_unavailable")
 
+    def test_missing_search_item_is_marked_stale(self):
+        saved = []
+        store = SimpleNamespace(
+            completed_search_tasks=lambda: [{"task_id": "old", "payload": {"media_type": "movie", "service_id": 42}, "result": {"id": 9}}],
+            save_acquisition_observation=lambda task_id, state, details: saved.append((task_id, state, details)),
+            task_exists=lambda task_type, parent_task_id: False,
+            audit=lambda *args: None,
+        )
+        planner = SimpleNamespace(monitor_search=lambda payload, result: (_ for _ in ()).throw(RuntimeError("radarr returned HTTP 404")))
+        plane = ControlPlane.__new__(ControlPlane)
+        plane.store = store
+        plane.planner = planner
+
+        result = plane.monitor_acquisitions("test")
+
+        self.assertEqual(result["summary"], {"monitor_stale": 1})
+        self.assertEqual(saved[0][1], "monitor_stale")
+
 
 class WorkerTests(unittest.TestCase):
     def test_multiple_editions_are_preserved_as_distinct_records(self):

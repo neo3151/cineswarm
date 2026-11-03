@@ -1433,7 +1433,7 @@ class ControlStore:
     def completed_search_tasks(self) -> list[dict[str, Any]]:
         with self.lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT task_id, task_type, payload_json, result_json, updated_at FROM tasks WHERE status='completed' AND task_type IN ('radarr_search_request','sonarr_search_request') AND task_id NOT IN (SELECT task_id FROM acquisition_observations WHERE state='monitor_unavailable') ORDER BY id DESC LIMIT 100"
+                "SELECT task_id, task_type, payload_json, result_json, updated_at FROM tasks WHERE status='completed' AND task_type IN ('radarr_search_request','sonarr_search_request') AND task_id NOT IN (SELECT task_id FROM acquisition_observations WHERE state IN ('monitor_unavailable','monitor_stale')) ORDER BY id DESC LIMIT 100"
             ).fetchall()
         results = []
         for row in rows:
@@ -1574,7 +1574,9 @@ class ControlPlane:
             try:
                 result = self.planner.monitor_search(task["payload"], task["result"])
             except Exception as exc:
-                result = {"state": "monitor_unavailable", "media_type": task["payload"].get("media_type"), "service_id": task["payload"].get("service_id"), "error": str(exc)}
+                error = str(exc)
+                state = "monitor_stale" if "HTTP 404" in error else "monitor_unavailable"
+                result = {"state": state, "media_type": task["payload"].get("media_type"), "service_id": task["payload"].get("service_id"), "error": error}
             self.store.save_acquisition_observation(task["task_id"], result.get("state", "unknown"), result)
             observations.append({"task_id": task["task_id"], **result})
         summary = {}
