@@ -1300,6 +1300,7 @@ class WorkerTests(unittest.TestCase):
                         "seriesType": "standard",
                         "year": 2013,
                         "titleSlug": "rick-and-morty",
+                        "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}, {"seasonNumber": 3}],
                         "network": "Adult Swim",
                         "originalLanguage": "eng",
                     }]

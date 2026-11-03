@@ -473,6 +473,27 @@ class Worker:
             terms.append(clean)
         return terms
 
+    @staticmethod
+    def _tv_season_count(candidate: dict[str, Any]) -> int | None:
+        seasons = candidate.get("seasons")
+        if isinstance(seasons, list):
+            numbers = []
+            for season in seasons:
+                if not isinstance(season, dict):
+                    continue
+                try:
+                    number = int(season.get("seasonNumber"))
+                except (TypeError, ValueError):
+                    continue
+                if number > 0:
+                    numbers.append(number)
+            return len(set(numbers))
+        try:
+            count = int(seasons)
+        except (TypeError, ValueError):
+            return None
+        return count if count > 0 else None
+
     def _tv_growth_lookup(self, sonarr: Any, term: str, owned_tvdb: set[Any], owned_titles: set[str]) -> dict[str, Any] | None:
         try:
             matches = sonarr.get("api/v3/series/lookup", {"term": term})
@@ -511,6 +532,11 @@ class Worker:
                 )
                 if key in match
             }
+            season_count = self._tv_season_count(candidate)
+            min_seasons = max(1, min(self._policy_int("CINESWARM_TV_GROWTH_MIN_SEASONS", 1), 20))
+            max_seasons = max(min_seasons, min(self._policy_int("CINESWARM_TV_GROWTH_MAX_SEASONS", 5), 20))
+            if season_count is None or not min_seasons <= season_count <= max_seasons:
+                continue
             return candidate
         return None
 
