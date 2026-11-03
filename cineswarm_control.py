@@ -1152,6 +1152,13 @@ class ControlStore:
         acquisition_task_rows = [row for row in task_rows if row["task_type"] in ("radarr_add_request", "sonarr_add_request", "radarr_search_request", "sonarr_search_request")]
         observation_states = Counter(row["state"] for row in observation_rows)
         job_statuses = Counter(row["status"] for row in job_rows)
+        acquisition_attention_states = failure_states | {
+            "search_completed_no_file",
+            "search_no_release",
+            "search_rejected",
+            "import_failed",
+            "import_blocked",
+        }
         issues: list[dict[str, Any]] = []
         for row in audit_rows:
             if str(row["status"]).casefold() in failure_states:
@@ -1160,7 +1167,7 @@ class ControlStore:
             if str(row["status"]).casefold() in failure_states | blocked_states:
                 issues.append({"type": "task_attention", "task_type": row["task_type"], "status": row["status"]})
         for row in observation_rows:
-            if str(row["state"]).casefold() in failure_states or row["state"] == "search_completed_no_file":
+            if str(row["state"]).casefold() in acquisition_attention_states:
                 issues.append({"type": "acquisition_attention", "state": row["state"]})
         for row in preservation_rows:
             summary = json.loads(row.get("summary_json") or "{}")
@@ -4947,4 +4954,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

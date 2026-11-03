@@ -172,6 +172,44 @@ class AcquisitionPlannerTests(unittest.TestCase):
         self.assertEqual(result["state"], "imported")
         self.assertEqual(result["command_id"], 9)
 
+    def test_monitor_search_classifies_no_release_result(self):
+        class MonitorClient:
+            def get(self, path, params=None):
+                if path == "api/v3/command/9":
+                    return {"status": "completed", "result": "No releases found"}
+                if path == "api/v3/movie/42":
+                    return {"id": 42, "title": "Unavailable", "hasFile": False}
+                if path == "api/v3/queue":
+                    return {"records": []}
+                raise AssertionError(path)
+
+        result = AcquisitionPlanner(MonitorClient(), MonitorClient(), None).monitor_search(
+            {"media_type": "movie", "service_id": 42},
+            {"id": 9},
+        )
+
+        self.assertEqual(result["state"], "search_no_release")
+        self.assertEqual(result["outcome_reason"], "No releases found")
+
+    def test_monitor_search_classifies_import_blocked_queue_item(self):
+        class MonitorClient:
+            def get(self, path, params=None):
+                if path == "api/v3/command/9":
+                    return {"status": "completed", "result": "successful"}
+                if path == "api/v3/movie/42":
+                    return {"id": 42, "title": "Blocked", "hasFile": False}
+                if path == "api/v3/queue":
+                    return {"records": [{"movieId": 42, "status": "completed", "trackedDownloadState": "importBlocked"}]}
+                raise AssertionError(path)
+
+        result = AcquisitionPlanner(MonitorClient(), MonitorClient(), None).monitor_search(
+            {"media_type": "movie", "service_id": 42},
+            {"id": 9},
+        )
+
+        self.assertEqual(result["state"], "import_blocked")
+        self.assertEqual(result["outcome_reason"], "importblocked")
+
     def test_failed_downloads_returns_only_failed_records_with_service_ids(self):
         queue = {
             "records": [
