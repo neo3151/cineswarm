@@ -178,6 +178,15 @@ def classify_issues(metrics: dict[str, Any]) -> list[dict[str, Any]]:
             "pending": retries,
         })
 
+    monitor_unavailable = _int(metrics.get("acquisition_monitor_unavailable"))
+    if monitor_unavailable >= 3:
+        issues.append({
+            "code": "acquisition_monitor_unavailable",
+            "severity": "attention",
+            "summary": f"{monitor_unavailable} recent acquisition searches cannot be verified against Radarr/Sonarr. Recovery decisions may be delayed.",
+            "count": monitor_unavailable,
+        })
+
     watch_titles = metrics.get("watch_titles")
     if watch_titles is not None and _int(watch_titles) < 50:
         issues.append({
@@ -258,6 +267,7 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
         "av1_count": 0,
         "plex_refresh_pending": 0,
         "pending_search_retries": 0,
+        "acquisition_monitor_unavailable": 0,
         "acquire_skip_streak": 0,
         "last_acquire_decision": "",
         "skip_counts": {},
@@ -317,6 +327,13 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
     except Exception:
         pass
 
+    try:
+        observations = status.get("observations") or []
+        metrics["acquisition_monitor_unavailable"] = sum(
+            1 for item in observations if item.get("state") == "monitor_unavailable"
+        )
+    except Exception:
+        pass
     try:
         metrics["plex_refresh_pending"] = len(store.pending_tasks("plex_library_refresh", limit=50))
         metrics["pending_search_retries"] = len(store.pending_tasks("radarr_search_retry_request", limit=50)) + len(

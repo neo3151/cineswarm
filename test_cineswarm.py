@@ -153,6 +153,25 @@ class AcquisitionPlannerTests(unittest.TestCase):
         self.assertEqual(result["state"], "download_active")
         self.assertEqual(result["queue_status"], "downloading")
 
+    def test_monitor_search_accepts_wrapped_command_result(self):
+        class MonitorClient:
+            def get(self, path, params=None):
+                if path == "api/v3/command/9":
+                    return {"status": "completed"}
+                if path == "api/v3/movie/42":
+                    return {"id": 42, "title": "Imported", "hasFile": True}
+                if path == "api/v3/queue":
+                    return {"records": []}
+                raise AssertionError(path)
+
+        result = AcquisitionPlanner(MonitorClient(), MonitorClient(), None).monitor_search(
+            {"media_type": "movie", "service_id": 42},
+            {"result": {"commandId": 9}},
+        )
+
+        self.assertEqual(result["state"], "imported")
+        self.assertEqual(result["command_id"], 9)
+
     def test_failed_downloads_returns_only_failed_records_with_service_ids(self):
         queue = {
             "records": [

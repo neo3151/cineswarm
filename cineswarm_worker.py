@@ -1109,7 +1109,12 @@ class Worker:
                     if result:
                         acquired.append(result)
 
+            never_imported: dict[str, Any] = {"count": 0, "recovered": []}
             leftover = max(0, acquire_cap + tv_reserved - len(acquired))
+            if leftover and self._policy_bool("CINESWARM_FULL_AUTOPILOT") and hasattr(self.plane, "never_imported_movies"):
+                never_imported = self._recover_never_imported(limit=leftover)
+                leftover = max(0, leftover - len(never_imported.get("recovered") or []))
+
             tv_growth: dict[str, Any] = {"status": "disabled", "added": [], "searched": []}
             if leftover and tv_max:
                 try:
@@ -1117,11 +1122,6 @@ class Worker:
                 except Exception as exc:
                     tv_growth = {"status": "error", "error": str(exc), "added": [], "searched": []}
                 leftover = max(0, leftover - len(tv_growth.get("added") or []) - len(tv_growth.get("searched") or []))
-
-            never_imported: dict[str, Any] = {"count": 0, "recovered": []}
-            if leftover and self._policy_bool("CINESWARM_FULL_AUTOPILOT") and hasattr(self.plane, "never_imported_movies"):
-                never_imported = self._recover_never_imported(limit=leftover)
-                leftover = max(0, leftover - len(never_imported.get("recovered") or []))
 
             if acquired:
                 payload = {

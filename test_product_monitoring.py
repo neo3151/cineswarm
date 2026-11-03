@@ -172,6 +172,23 @@ class IncomingIssuesClassifierTests(unittest.TestCase):
         self.assertEqual(issues, [])
         self.assertEqual(overall_severity(issues), "ok")
 
+    def test_unavailable_acquisition_monitoring_is_attention(self):
+        from cineswarm_ops_pulse import classify_issues
+
+        issues = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "downloads_active": 2,
+            "acquisition_monitor_unavailable": 3,
+        })
+
+        self.assertEqual(
+            [issue["code"] for issue in issues],
+            ["acquisition_monitor_unavailable"],
+        )
+        self.assertEqual(issues[0]["severity"], "attention")
+
     def test_tv_growth_progress_is_watch_only_and_reversible(self):
         from cineswarm_ops_pulse import classify_issues
         issues = classify_issues({

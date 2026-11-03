@@ -632,7 +632,11 @@ class AcquisitionPlanner:
     def monitor_search(self, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         media_type = payload.get("media_type")
         service_id = payload.get("service_id")
-        command_id = result.get("id")
+        result = result if isinstance(result, dict) else {}
+        command_id = result.get("id") or result.get("commandId") or result.get("command_id")
+        if not command_id and isinstance(result.get("result"), dict):
+            nested = result["result"]
+            command_id = nested.get("id") or nested.get("commandId") or nested.get("command_id")
         if media_type not in ("movie", "series") or not service_id or not command_id:
             return {"state": "invalid_search_result", "media_type": media_type, "service_id": service_id, "command_id": command_id}
         client = self.radarr if media_type == "movie" else self.sonarr
@@ -641,8 +645,13 @@ class AcquisitionPlanner:
         item = client.get(item_path)
         include_unknown_key = "includeUnknownMovieItems" if media_type == "movie" else "includeUnknownSeriesItems"
         queue = client.get("api/v3/queue", {"page": 1, "pageSize": 100, include_unknown_key: "true"})
+        command = command if isinstance(command, dict) else {}
+        item = item if isinstance(item, dict) else {}
+        queue = queue if isinstance(queue, dict) else {}
         service_id_key = "movieId" if media_type == "movie" else "seriesId"
-        queue_item = next((record for record in queue.get("records", []) if record.get(service_id_key) == service_id), None)
+        records = queue.get("records", [])
+        records = records if isinstance(records, list) else []
+        queue_item = next((record for record in records if isinstance(record, dict) and record.get(service_id_key) == service_id), None)
         failed_statuses = {"failed", "warning", "importFailed", "importFailedPathDoesNotExist"}
         if command.get("status") not in ("completed", "failed"):
             state = "search_running"
@@ -1589,6 +1598,5 @@ class MultiAgentConsensusGraph:
             "node_votes": votes,
             "summary": "Consensus approved by all agent nodes" if consensus_approved else f"Rejected by {', '.join(rejections)}: {votes[rejections[0]]['reason']}"
         }
-
 
 
