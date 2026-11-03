@@ -17,11 +17,11 @@ services:
       CINESWARM_PRESERVATION_UNION_ROOTS: /media
       CINESWARM_PRESERVATION_BRANCHES: /media
       CINESWARM_PRESERVATION_MOUNTS: /media
-      PLEX_URL: ${PLEX_URL:-http://host.docker.internal:32400}
+      PLEX_URL: ${PLEX_URL:-http://192.168.1.23:32400}
       PLEX_TOKEN: ${PLEX_TOKEN:-}
-      RADARR_URL: ${RADARR_URL:-http://host.docker.internal:7878}
+      RADARR_URL: ${RADARR_URL:-http://192.168.1.23:7878}
       RADARR_API_KEY: ${RADARR_API_KEY:-}
-      SONARR_URL: ${SONARR_URL:-http://host.docker.internal:8989}
+      SONARR_URL: ${SONARR_URL:-http://192.168.1.23:8989}
       SONARR_API_KEY: ${SONARR_API_KEY:-}
       SABNZBD_URL: ${SABNZBD_URL:-}
       SABNZBD_API_KEY: ${SABNZBD_API_KEY:-}

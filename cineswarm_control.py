@@ -1546,7 +1546,7 @@ class ControlPlane:
 
 
 
-        plex_url = os.environ.get("PLEX_URL", "http://127.0.0.1:32400")
+        plex_url = os.environ.get("PLEX_URL", "http://192.168.1.23:32400")
         plex_token = os.environ.get("PLEX_TOKEN", "")
         self.discovery = DiscoveryEngine(store, planner, self.agents.tools, plex_url, plex_token) if planner else None
 
@@ -2361,9 +2361,9 @@ class ControlPlane:
 
     def run_x265_upgrade_sweep(self, batch_size: int = 100, actor: str = "autonomic") -> dict[str, Any]:
         """Trigger aggressive x265/HEVC upgrade search batch across Radarr and Sonarr Cutoff Unmet queues."""
-        sonarr_url = os.environ.get("SONARR_URL", "http://127.0.0.1:8989")
+        sonarr_url = os.environ.get("SONARR_URL", "http://192.168.1.23:8989")
         sonarr_api = os.environ.get("SONARR_API_KEY", "")
-        radarr_url = os.environ.get("RADARR_URL", "http://127.0.0.1:7878")
+        radarr_url = os.environ.get("RADARR_URL", "http://192.168.1.23:7878")
         radarr_api = os.environ.get("RADARR_API_KEY", "")
 
         movie_count = 0
@@ -4839,12 +4839,12 @@ class Handler(BaseHTTPRequestHandler):
 def make_plane() -> ControlPlane:
     store = ControlStore()
     connectors: dict[str, Callable[[], dict[str, Any]]] = {}
-    plex_url = os.environ.get("PLEX_URL", "http://127.0.0.1:32400")
+    plex_url = os.environ.get("PLEX_URL", "http://192.168.1.23:32400")
     plex_token = os.environ.get("PLEX_TOKEN", "")
     plex_connector = PlexConnector(ServiceConfig("plex", plex_url, plex_token, "X-Plex-Token"))
     connectors["plex"] = plex_connector.snapshot
-    radarr_config = ServiceConfig("radarr", os.environ.get("RADARR_URL", "http://127.0.0.1:7878"), os.environ.get("RADARR_API_KEY", ""), "X-Api-Key")
-    sonarr_config = ServiceConfig("sonarr", os.environ.get("SONARR_URL", "http://127.0.0.1:8989"), os.environ.get("SONARR_API_KEY", ""), "X-Api-Key")
+    radarr_config = ServiceConfig("radarr", os.environ.get("RADARR_URL", "http://192.168.1.23:7878"), os.environ.get("RADARR_API_KEY", ""), "X-Api-Key")
+    sonarr_config = ServiceConfig("sonarr", os.environ.get("SONARR_URL", "http://192.168.1.23:8989"), os.environ.get("SONARR_API_KEY", ""), "X-Api-Key")
     connectors["radarr"] = ArrConnector(radarr_config, "movie").snapshot
     connectors["sonarr"] = ArrConnector(sonarr_config, "series").snapshot
     plex_config = ServiceConfig("plex", plex_url, plex_token, "X-Plex-Token")
