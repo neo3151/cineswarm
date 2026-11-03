@@ -1359,6 +1359,28 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([item["service_id"] for item in result["recovered"]], [2])
         self.assertEqual(result["exhausted"][0]["service_id"], 9)
 
+    def test_never_imported_rearms_exhausted_title_after_window(self):
+        worker = Worker.__new__(Worker)
+        store = FakeControlStore()
+        store.record_decision = lambda *args, **kwargs: "decision-gap"
+        store.update_decision = lambda *args, **kwargs: None
+        store.search_attempt_counts = lambda task_type, media_type: {"9": 3}
+        store.search_attempt_history = lambda task_type, media_type: {"9": ["2025-01-01T00:00:00+00:00"]}
+        worker.control_store = store
+        worker.plane = SimpleNamespace(
+            never_imported_movies=lambda added_since_days=14, limit=20: {
+                "count": 1,
+                "recent": [{"title": "Rearmed", "service_id": 9, "monitored": True, "added": "2025-01-08", "genres": ["Comedy"]}],
+            },
+            approve_task=lambda task_id, actor: {"result": {"id": 77}},
+        )
+
+        with patch.dict(os.environ, {"CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS": "3", "CINESWARM_NEVER_IMPORTED_EXHAUSTED_RETRY_DAYS": "30"}):
+            result = worker._recover_never_imported()
+
+        self.assertEqual(result["recovered"][0]["service_id"], 9)
+        self.assertEqual(result["exhausted"], [])
+
     def test_emergency_stop_blocks_failed_download_recovery(self):
         worker = Worker.__new__(Worker)
         calls = []
@@ -1888,4 +1910,3 @@ class LibraryBrainTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

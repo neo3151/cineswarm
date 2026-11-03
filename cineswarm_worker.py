@@ -369,6 +369,9 @@ class Worker:
         attempt_counts = {}
         if hasattr(self.control_store, "search_attempt_counts"):
             attempt_counts = self.control_store.search_attempt_counts("radarr_search_request", "movie")
+        attempt_history = {}
+        if hasattr(self.control_store, "search_attempt_history"):
+            attempt_history = self.control_store.search_attempt_history("radarr_search_request", "movie")
         for item in candidates:
             if is_boxset_title(item.get("title")):
                 continue
@@ -377,8 +380,17 @@ class Worker:
                 continue
             prior_attempts = int(attempt_counts.get(str(service_id), 0))
             if prior_attempts >= max_attempts:
-                exhausted.append({"service_id": service_id, "title": item.get("title"), "attempts": prior_attempts})
-                continue
+                history = attempt_history.get(str(service_id), [])
+                latest_attempt = max(history, default="")
+                try:
+                    latest_age = (datetime.now(timezone.utc) - datetime.fromisoformat(latest_attempt.replace("Z", "+00:00"))).total_seconds()
+                except (TypeError, ValueError):
+                    latest_age = 0
+                rearm_days = max(1, min(self._policy_int("CINESWARM_NEVER_IMPORTED_EXHAUSTED_RETRY_DAYS", 30), 365))
+                if latest_age < rearm_days * 86400:
+                    exhausted.append({"service_id": service_id, "title": item.get("title"), "attempts": prior_attempts, "rearm_after_days": rearm_days})
+                    continue
+                prior_attempts = 0
             parent_task_id = f"never-imported:{service_id}"
             inflight = getattr(self.control_store, "task_inflight", None)
             if callable(inflight) and inflight("radarr_search_request", parent_task_id):

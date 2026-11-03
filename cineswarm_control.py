@@ -91,7 +91,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
     "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
     "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN",
-    "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", "CINESWARM_WATCH_LEDGER_LIMIT", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", "CINESWARM_AV1_MONITORING_ENABLED",
+    "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", "CINESWARM_NEVER_IMPORTED_EXHAUSTED_RETRY_DAYS", "CINESWARM_WATCH_LEDGER_LIMIT", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", "CINESWARM_AV1_MONITORING_ENABLED",
     "CINESWARM_TV_GROWTH", "CINESWARM_TV_GROWTH_TARGET", "CINESWARM_TV_GROWTH_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
@@ -1390,6 +1390,23 @@ class ControlStore:
             key = str(service_id)
             counts[key] = counts.get(key, 0) + 1
         return counts
+
+    def search_attempt_history(self, task_type: str, media_type: str) -> dict[str, list[str]]:
+        history: dict[str, list[str]] = {}
+        with self.lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json, created_at FROM tasks WHERE task_type=? AND status IN ('completed','failed')",
+                (task_type,),
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            if payload.get("media_type") != media_type:
+                continue
+            service_id = payload.get("service_id")
+            if service_id in (None, ""):
+                continue
+            history.setdefault(str(service_id), []).append(str(row["created_at"]))
+        return history
 
     def retry_cooldown_active(self, task_type: str, media_type: str, service_id: Any, cooldown: int) -> bool:
         cutoff = datetime.fromtimestamp(time.time() - max(0, cooldown), timezone.utc).isoformat(timespec="seconds")
