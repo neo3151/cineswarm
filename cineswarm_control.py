@@ -91,7 +91,7 @@ LOCAL_ENV_KEYS = {
     "CINESWARM_BACKUP_DIR", "CINESWARM_BACKUP_RETENTION", "CINESWARM_DATABASE_FULL_INTEGRITY_CHECK",
     "CINESWARM_OFFSITE_VAULT_TARGET", "CINESWARM_PLEX_WEBHOOK_URL", "CINESWARM_PLEX_PROFILE_MAP",
     "CINESWARM_NEVER_IMPORTED_MAX_PER_CYCLE", "CINESWARM_NEVER_IMPORTED_DAYS", "CINESWARM_NEVER_IMPORTED_SEARCH_COOLDOWN",
-    "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", "CINESWARM_WATCH_LEDGER_LIMIT", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE",
+    "CINESWARM_NEVER_IMPORTED_MAX_ATTEMPTS", "CINESWARM_WATCH_LEDGER_LIMIT", "CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", "CINESWARM_AV1_MONITORING_ENABLED",
     "CINESWARM_TV_GROWTH", "CINESWARM_TV_GROWTH_TARGET", "CINESWARM_TV_GROWTH_MAX_PER_CYCLE",
     "CINESWARM_DASHBOARD_USERNAME", "CINESWARM_DASHBOARD_PASSWORD",
 }
@@ -1672,6 +1672,10 @@ class ControlPlane:
             "policies": self.store.get_all_policies(),
         }
 
+    def av1_monitoring_enabled(self) -> bool:
+        value = self.store.get_policy("CINESWARM_AV1_MONITORING_ENABLED") or os.environ.get("CINESWARM_AV1_MONITORING_ENABLED", "false")
+        return str(value).lower() in {"1", "true", "yes", "on"}
+
     def probe_transcode_shield(self) -> dict[str, Any]:
         if not os.path.exists(CATALOG_DB):
             return {"status": "unavailable", "non_compliant_count": 0, "verified_count": 0}
@@ -1681,6 +1685,16 @@ class ControlPlane:
             av1_count = cursor.fetchone()[0]
             cursor.execute("SELECT COUNT(*) FROM catalog_items WHERE present = 1")
             total_count = cursor.fetchone()[0]
+        if not self.av1_monitoring_enabled():
+            return {
+                "status": "not_applicable",
+                "compliance_percentage": 100.0,
+                "non_compliant_count": 0,
+                "detected_count": av1_count,
+                "verified_count": total_count,
+                "hardware_accel": "Apple silicon / Mac clients",
+                "client_device": "Mac clients",
+            }
         verified = max(0, total_count - av1_count)
         compliance_pct = round((verified / total_count * 100), 1) if total_count > 0 else 100.0
         return {
@@ -1778,6 +1792,8 @@ class ControlPlane:
     def queue_av1_upgrade_searches(self, limit: int = 3, actor: str = "worker") -> dict[str, Any]:
         """Create a bounded Radarr search for existing AV1 files so they can be replaced with HEVC/H.264."""
         limit = max(0, min(int(limit), 10))
+        if not self.av1_monitoring_enabled():
+            return {"status": "disabled", "queued": []}
         if limit == 0 or not os.path.exists(CATALOG_DB):
             return {"status": "skipped", "queued": []}
         rows = []

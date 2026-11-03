@@ -197,7 +197,7 @@ def classify_issues(metrics: dict[str, Any]) -> list[dict[str, Any]]:
         })
 
     av1 = _int(metrics.get("av1_count"))
-    if av1 > 0:
+    if metrics.get("av1_monitoring_enabled") and av1 > 0:
         issues.append({
             "code": "av1_unaccelerated",
             "severity": "watch",
@@ -265,6 +265,7 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
         "never_imported": 0,
         "series_path_missing": 0,
         "av1_count": 0,
+        "av1_monitoring_enabled": False,
         "plex_refresh_pending": 0,
         "pending_search_retries": 0,
         "acquisition_monitor_unavailable": 0,
@@ -322,8 +323,13 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
     except Exception:
         pass
     try:
-        shield = plane.probe_transcode_shield()
-        metrics["av1_count"] = _int(shield.get("non_compliant_count"))
+        configured = store.get_policy("CINESWARM_AV1_MONITORING_ENABLED") if hasattr(store, "get_policy") else None
+        if configured is None:
+            configured = __import__("os").environ.get("CINESWARM_AV1_MONITORING_ENABLED", "false")
+        metrics["av1_monitoring_enabled"] = str(configured).lower() in {"1", "true", "yes", "on"}
+        if metrics["av1_monitoring_enabled"]:
+            shield = plane.probe_transcode_shield()
+            metrics["av1_count"] = _int(shield.get("non_compliant_count"))
     except Exception:
         pass
 

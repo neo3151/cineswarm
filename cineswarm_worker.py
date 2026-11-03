@@ -1277,6 +1277,7 @@ class Worker:
                 free_slots
                 and not pressure.get("pressured")
                 and hasattr(self.plane, "queue_av1_upgrade_searches")
+                and self._policy_bool("CINESWARM_AV1_MONITORING_ENABLED")
                 and self._policy_bool("CINESWARM_FULL_AUTOPILOT")
             ):
                 av1_limit = min(free_slots, self._policy_int("CINESWARM_AV1_UPGRADE_MAX_PER_CYCLE", 3))

@@ -144,6 +144,7 @@ class IncomingIssuesClassifierTests(unittest.TestCase):
             "plex_refresh_pending": 0,
             "watch_titles": 3,
             "av1_count": 177,
+            "av1_monitoring_enabled": True,
         })
         codes = {issue["code"] for issue in issues}
         self.assertIn("library_debt_growing", codes)
