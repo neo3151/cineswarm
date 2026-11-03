@@ -1835,7 +1835,7 @@ class ControlPlane:
                 genres = []
             for genre in genres:
                 genre_counts[genre] += 1
-            if len(recent) < max(1, min(int(limit), 50)):
+            if len(recent) < max(1, min(int(limit), 500)):
                 recent.append({
                     "title": row["title"],
                     "year": row["year"],

@@ -348,7 +348,7 @@ class Worker:
         """Search a bounded number of recent Radarr movies that were added but never imported."""
         preferred = {"comedy", "animation", "action", "science fiction", "family"}
         lookback = max(14, min(self._policy_int("CINESWARM_NEVER_IMPORTED_DAYS", 180), 730))
-        gaps = self.plane.never_imported_movies(added_since_days=lookback, limit=80)
+        gaps = self.plane.never_imported_movies(added_since_days=lookback, limit=500)
         candidates = list(gaps.get("recent") or [])
         candidates.sort(
             key=lambda item: (
