@@ -295,8 +295,8 @@ class AcquisitionPlannerTests(unittest.TestCase):
             pressure = AcquisitionPlanner(radarr, sonarr, None).global_queue_pressure(3)
 
         self.assertTrue(pressure["pressured"])
-        self.assertEqual(pressure["active"], 3)
-        self.assertEqual(pressure["sources"], {"radarr": 1, "sonarr": 3, "sabnzbd": 0})
+        self.assertEqual(pressure["active"], 2)
+        self.assertEqual(pressure["sources"], {"radarr": 1, "sonarr": 2, "sabnzbd": 0})
         self.assertFalse(pressure["sabnzbd"]["configured"])
 
 

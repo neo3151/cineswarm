@@ -816,6 +816,7 @@ class AcquisitionPlanner:
     def global_queue_pressure(self, limit: int, timeout: float | None = None) -> dict[str, Any]:
         probe_timeout = float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5") if timeout is None else timeout)
         failed_statuses = {"failed", "warning", "importfailed", "importfailedpathdoesnotexist"}
+        inactive_statuses = {"completed", "failed", "imported", "removed"}
         sources = {"radarr": 0, "sonarr": 0, "sabnzbd": 0}
         unique: dict[str, dict[str, Any]] = {}
         source_errors: dict[str, str] = {}
@@ -826,7 +827,8 @@ class AcquisitionPlanner:
                 source_errors[source] = exc.__class__.__name__
                 continue
             for record in records:
-                if str(record.get("status") or "").lower() in failed_statuses:
+                status = str(record.get("status") or "").lower()
+                if status in inactive_statuses or status in failed_statuses:
                     continue
                 download_id = record.get("download_id")
                 key = f"download:{download_id}" if download_id else f"{source}:{record.get('id')}"
@@ -1598,5 +1600,4 @@ class MultiAgentConsensusGraph:
             "node_votes": votes,
             "summary": "Consensus approved by all agent nodes" if consensus_approved else f"Rejected by {', '.join(rejections)}: {votes[rejections[0]]['reason']}"
         }
-
 
