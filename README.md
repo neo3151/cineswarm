@@ -133,7 +133,7 @@ Run the isolated regression suite with `python3 -m unittest -v`.
 
 ## Modern Mac + CineSwarm Monitor
 
-`cineswarm_btop.py` is a dependency-free, full-screen terminal monitor for a second display. It combines local Mac CPU, memory, disk, load, and process telemetry with live CineSwarm worker, queue, backlog, and incoming-issue data from `192.168.1.23`.
+`cineswarm_btop.py` is a dependency-free, full-screen terminal monitor for a second display. It shows btop-style CPU, memory, swap, disk, load, uptime, and top-process data for both the local Mac and the remote CineSwarm host (`devtop`), alongside worker, queue, and incoming-issue data. The remote resource panel is served by the read-only `/api/monitoring/system` endpoint.
 
 Open a large Terminal window on the Samsung monitor and run:
 

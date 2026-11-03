@@ -18,6 +18,7 @@ from collections import deque
 from datetime import datetime
 from typing import Any
 
+from cineswarm_system import system_metrics, top_processes
 
 CONTROL_URL = os.environ.get("CINESWARM_MONITOR_URL", "http://192.168.1.23:8787").rstrip("/")
 REFRESH_SECONDS = float(os.environ.get("CINESWARM_MONITOR_REFRESH", "2"))
@@ -122,7 +123,7 @@ def panel(window: Any, y: int, x: int, height: int, width: int, title: str, line
         safe_add(window, y + 1 + index, x + 2, line, 0, width - 4)
 
 
-def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: dict[str, Any], history: deque[float]) -> None:
+def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: dict[str, Any], devtop: dict[str, Any], history: deque[float]) -> None:
     window.erase()
     height, width = window.getmaxyx()
     if height < 20 or width < 90:
@@ -133,26 +134,33 @@ def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: d
     healthy = snapshot.get("overall_status") == "healthy"
     severity = incoming.get("severity", "unknown").upper()
     header_color = 2 if healthy else 3
-    safe_add(window, 0, 2, f"CINE//SWARM  |  MAC MINI  |  DEVTOP  |  {severity}", curses.color_pair(header_color) | curses.A_BOLD, width - 4)
+    safe_add(window, 0, 2, f"CINE//SWARM  |  MAC + DEVTOP  |  {severity}", curses.color_pair(header_color) | curses.A_BOLD, width - 4)
     safe_add(window, 1, 2, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  refresh {REFRESH_SECONDS:.1f}s  [q] quit [r] refresh", curses.color_pair(4), width - 4)
 
     gap = 2
     left = max(34, (width - gap) // 2)
     right = width - gap - left
-    panel(window, 3, 1, 8, left, "MAC TELEMETRY", [
-        f"CPU   {bar(mac['cpu'])} {mac['cpu']:5.1f}%",
-        f"MEM   {bar(mac['memory_pct'])} {mac['memory_used_gb']:4.1f}/{mac['memory_total_gb']:4.1f} GB",
-        f"DISK  used {mac['disk_used']:>5}   free {mac['disk_free']:>5}",
-        f"LOAD  {mac['load']}",
-        "GPU   Apple Silicon / Metal",
-    ], 4)
+    def resource_lines(item: dict[str, Any]) -> list[str]:
+        if not item:
+            return ["unavailable", "Check CINESWARM_MONITOR_URL"]
+        return [
+            f"CPU   {bar(float(item.get('cpu', 0)))} {float(item.get('cpu', 0)):5.1f}%  ({item.get('cores', '?')} cores)",
+            f"MEM   {bar(float(item.get('memory_pct', 0)))} {item.get('memory_used_gb', '?'):>4}/{item.get('memory_total_gb', '?'):>4} GB",
+            f"SWAP  {item.get('swap_used_gb', '?'):>5} GB",
+            f"DISK  {item.get('disk_used_gb', '?'):>4}/{item.get('disk_total_gb', '?'):>4} GB  free {item.get('disk_free_gb', '?'):>4}",
+            f"LOAD  {item.get('load', '?')}",
+            f"UP    {item.get('uptime', '?')}",
+        ]
+    panel(window, 3, 1, 9, left, f"MAC [{mac.get('host', 'local')}]", resource_lines(mac), 4)
     worker = snapshot.get("worker") or {}
     queue = snapshot.get("queue_pressure") or {}
-    panel(window, 3, 1 + left + gap, 8, right, "CINESWARM OPS", [
+    panel(window, 3, 1 + left + gap, 9, right, f"DEVTOP [{devtop.get('host', 'remote')}]", resource_lines(devtop) if devtop else [
+        "unavailable", "API endpoint did not respond",
+    ], header_color)
+    panel(window, 13, 1, 6, left, "CINESWARM OPS", [
         f"WORKER {str(worker.get('status', '?')).upper():<10} age {worker.get('age_seconds', '?')}s",
         f"QUEUE  {queue.get('active', 0)}/{queue.get('limit', 4)} active",
         f"RADARR {snapshot.get('downloads', {}).get('movies', 0)}  SONARR {snapshot.get('downloads', {}).get('series', 0)}",
-        f"AV1   not applicable (Mac clients)",
         f"PLEX  {snapshot.get('library_integrity', {}).get('movies', {}).get('indexed', '?')} indexed",
     ], header_color)
 
@@ -161,17 +169,16 @@ def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: d
         issue_lines.append(f"{issue.get('code', '?')}: {issue.get('summary', '')}")
     if not issue_lines:
         issue_lines = ["No ranked household issues."]
-    panel(window, 12, 1, 7, left, "INCOMING ISSUES", issue_lines, 3 if severity in {"ATTENTION", "CRITICAL"} else 4)
+    panel(window, 13, 1 + left + gap, 6, right, "INCOMING ISSUES", issue_lines, 3 if severity in {"ATTENTION", "CRITICAL"} else 4)
 
-    processes = [f"{p['pid']:>7} {p['cpu']:>5}% {p['mem']:>5}% {p['name']}" for p in mac["processes"]]
-    panel(window, 12, 1 + left + gap, 7, right, "TOP PROCESSES", processes or ["No process data"], 4)
+    def process_lines(item: dict[str, Any], label: str) -> list[str]:
+        return [
+            f"{label:<6} {p['pid']:>7} {p['cpu']:>5}% {p['mem']:>5}% {p['name']}"
+            for p in item.get("processes", [])
+        ]
+    processes = process_lines(mac, "MAC") + process_lines(devtop, "DEVTOP")
+    panel(window, 20, 1, max(3, height - 21), width - 2, "TOP PROCESSES", processes or ["No process data"], 4)
 
-    panel(window, 20, 1, max(3, height - 21), width - 2, "BACKLOG / CONTROLS", [
-        f"Movies without files: {snapshot.get('library_integrity', {}).get('movies', {}).get('without_file', '?')}",
-        f"Never imported:        {snapshot.get('library_integrity', {}).get('movies', {}).get('never_imported', '?')}",
-        f"Files not indexed:     {snapshot.get('library_integrity', {}).get('movies', {}).get('file_not_indexed', '?')}",
-        "Autopilot: ON   TV growth: ON (1-5 seasons)   AV1 actions: OFF",
-    ], 4)
     window.refresh()
 
 
@@ -199,7 +206,9 @@ def run(window: Any) -> None:
         if key in (ord("r"), ord("R")) or now - last_refresh >= REFRESH_SECONDS:
             snapshot = json_get("/api/monitoring/snapshot")
             incoming = json_get("/api/monitoring/incoming")
-            draw(window, snapshot, incoming, mac_metrics(), deque())
+            mac = system_metrics()
+            mac["processes"] = top_processes()
+            draw(window, snapshot, incoming, mac, json_get("/api/monitoring/system"), deque())
             last_refresh = now
         time.sleep(0.05)
 

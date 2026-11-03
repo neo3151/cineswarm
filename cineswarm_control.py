@@ -43,6 +43,7 @@ from cineswarm_mesh import SwarmMeshSyncEngine
 from cineswarm_artwork import DynamicArtworkEngine
 from cineswarm_fleet import EnterpriseFleetManager
 from cineswarm_dashboard import DASHBOARD_HTML as REORGANIZED_DASHBOARD_HTML
+from cineswarm_system import system_metrics, top_processes
 
 
 
@@ -110,6 +111,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/preservation": "/api/preservation",
     "/api/v1/monitoring/snapshot": "/api/monitoring/snapshot",
     "/api/v1/monitoring/incoming": "/api/monitoring/incoming",
+    "/api/v1/monitoring/system": "/api/monitoring/system",
 }
 
 
@@ -4056,7 +4058,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _public_path(path: str, method: str) -> bool:
-        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming"}
+        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming", "/api/monitoring/system", "/api/v1/monitoring/system"}
         public_post = {"/api/webhooks/plex", "/api/webhooks/sabnzbd"}
         if method == "GET":
             return path in public_get
@@ -4141,6 +4143,10 @@ class Handler(BaseHTTPRequestHandler):
         elif canonical_path == "/api/monitoring/incoming":
             persist = str(urllib.parse.parse_qs(parsed.query).get("persist", ["0"])[0]).lower() in {"1", "true", "yes"}
             self._send(200, self.plane.incoming_issues_report(persist=persist))
+        elif canonical_path == "/api/monitoring/system":
+            metrics = system_metrics()
+            metrics["processes"] = top_processes()
+            self._send(200, metrics)
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):
