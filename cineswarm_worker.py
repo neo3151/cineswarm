@@ -511,7 +511,10 @@ class Worker:
                 continue
             if str(match.get("seriesType") or "standard").lower() == "daily":
                 continue
-            language = str(match.get("originalLanguage") or match.get("language") or "eng").lower()
+            language_value = match.get("originalLanguage") or match.get("language") or "eng"
+            if isinstance(language_value, dict):
+                language_value = language_value.get("name") or language_value.get("isoCode") or "eng"
+            language = str(language_value).lower()
             if language not in {"", "eng", "en", "english"}:
                 continue
             genres = match.get("genres") or []
