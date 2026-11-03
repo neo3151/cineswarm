@@ -14,7 +14,7 @@ from cineswarm_discord import DiscordService
 from cineswarm_learning import AutonomicSwarmEvolutionEngine
 from cineswarm_preservation import collect_mount_health, collect_storage_events, mapped_path, online_backup, preservation_scan, resolve_physical_path, restore_database, rotate_backups, sync_offsite_vault
 from cineswarm_user_profiles import MultiUserTasteEngine
-from cineswarm_worker import Worker, WorkerStore
+from cineswarm_worker import Worker, WorkerStore, utc_epoch
 
 
 class FakeArrClient:
@@ -790,6 +790,25 @@ class WorkerTests(unittest.TestCase):
                 row = connection.execute("SELECT status, last_error FROM worker_jobs WHERE job_id=?", (job["job_id"],)).fetchone()
 
         self.assertEqual(tuple(row), ("completed", None))
+
+    def test_legacy_schedule_timestamp_is_reactivated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkerStore(f"{directory}/worker.db")
+            with store.connect() as connection:
+                connection.execute(
+                    "INSERT INTO worker_schedules (job_type, interval_seconds, next_run_at) VALUES (?, ?, ?)",
+                    ("legacy", 60, "2026-10-28T12:20:27+00:00"),
+                )
+
+            store.ensure_schedules({"legacy": 60})
+
+            with store.connect() as connection:
+                value = connection.execute(
+                    "SELECT next_run_at FROM worker_schedules WHERE job_type='legacy'"
+                ).fetchone()[0]
+
+        self.assertIsInstance(value, float)
+        self.assertLessEqual(value, utc_epoch())
 
     def test_worker_store_records_heartbeat_and_notification_cooldown(self):
         with tempfile.TemporaryDirectory() as directory:

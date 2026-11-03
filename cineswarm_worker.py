@@ -105,6 +105,17 @@ class WorkerStore:
                     "UPDATE worker_schedules SET interval_seconds=? WHERE job_type=?",
                     (interval, job_type),
                 )
+                current = connection.execute(
+                    "SELECT next_run_at FROM worker_schedules WHERE job_type=?",
+                    (job_type,),
+                ).fetchone()
+                try:
+                    float(current["next_run_at"])
+                except (TypeError, ValueError):
+                    connection.execute(
+                        "UPDATE worker_schedules SET next_run_at=? WHERE job_type=?",
+                        (timestamp, job_type),
+                    )
 
     def enqueue_due_schedules(self) -> int:
         timestamp = utc_epoch()
