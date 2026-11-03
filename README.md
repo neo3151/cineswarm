@@ -131,6 +131,18 @@ Run the isolated regression suite with `python3 -m unittest -v`.
 
 ## Discord Chat Bot
 
+## Modern Mac + CineSwarm Monitor
+
+`cineswarm_btop.py` is a dependency-free, full-screen terminal monitor for a second display. It combines local Mac CPU, memory, disk, load, and process telemetry with live CineSwarm worker, queue, backlog, and incoming-issue data from `192.168.1.23`.
+
+Open a large Terminal window on the Samsung monitor and run:
+
+```bash
+python3 cineswarm_btop.py
+```
+
+Press `r` to refresh immediately or `q` to quit. Override the control-plane URL or refresh interval with `CINESWARM_MONITOR_URL` and `CINESWARM_MONITOR_REFRESH`.
+
 The private Discord Gateway bot runs from `cineswarm_discord.py` and uses an outbound connection, so no public inbound port is required. Install the pinned environment with `python3 -m venv .venv` and `.venv/bin/pip install -r requirements.txt`.
 
 Create an application at `https://discord.com/developers/applications`, add a bot, enable **Message Content Intent**, and invite it with the `bot` scope plus View Channels, Send Messages, Read Message History, and Embed Links permissions. Store the token only in `.env`. Either configure the numeric allowlist directly or use the one-time pairing code to capture it automatically:
