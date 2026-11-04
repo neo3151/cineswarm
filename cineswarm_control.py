@@ -3100,6 +3100,24 @@ class ControlPlane:
         action = self.actions.get(task["task_type"])
         if not action:
             raise ServiceError("Approved action is not configured")
+        if task["task_type"] in {
+            "radarr_search_request",
+            "sonarr_search_request",
+            "radarr_search_retry_request",
+            "sonarr_search_retry_request",
+            "radarr_release_grab_request",
+        } and self.planner is not None:
+            limit = max(1, int(os.environ.get("CINESWARM_AUTO_MAX_CONCURRENT_DOWNLOADS", "4") or 4))
+            pressure = self.planner.global_queue_pressure(limit, timeout=5)
+            if pressure.get("errors") or pressure.get("pressured"):
+                details = {
+                    "task_id": task_id,
+                    "active": pressure.get("active"),
+                    "limit": pressure.get("limit", limit),
+                    "errors": pressure.get("errors") or {},
+                }
+                self.store.audit(actor, "approve_task", task["task_type"], "approval-gated", "blocked_queue_limit", details)
+                raise ServiceError("Search is held until the download queue is below the configured concurrency limit")
         target = "radarr" if task["task_type"].startswith("radarr_") else "sonarr" if task["task_type"].startswith("sonarr_") else "plex"
         self.store.update_task(task_id, "running")
         self.store.audit(actor, "approve_task", task["task_type"], "approval-gated", "approved", {"task_id": task_id})

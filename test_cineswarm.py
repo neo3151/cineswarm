@@ -705,6 +705,33 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_search_approval_honors_global_queue_limit(self):
+        calls = []
+        audits = []
+        store = SimpleNamespace(
+            is_emergency_stop=lambda: False,
+            task=lambda task_id: {"task_id": task_id, "task_type": "radarr_search_request", "status": "pending_approval", "payload": {}},
+            audit=lambda *args: audits.append(args),
+        )
+        planner = SimpleNamespace(
+            global_queue_pressure=lambda limit, timeout=None: {
+                "pressured": True,
+                "active": 4,
+                "limit": limit,
+                "errors": {},
+            }
+        )
+        plane = ControlPlane.__new__(ControlPlane)
+        plane.store = store
+        plane.planner = planner
+        plane.actions = {"radarr_search_request": lambda payload: calls.append(payload)}
+
+        with self.assertRaises(ServiceError):
+            plane.approve_task("search-task", "test")
+
+        self.assertEqual(calls, [])
+        self.assertEqual(audits[-1][4], "blocked_queue_limit")
+
     def test_never_imported_movies_classifies_catalog_gaps(self):
         plane = ControlPlane.__new__(ControlPlane)
         with tempfile.TemporaryDirectory() as tmp:
