@@ -32,7 +32,14 @@ from cineswarm_agents import AcquisitionPlanner, AgentError, AgentOrchestrator, 
 
 
 from cineswarm_chapters import ChapterSummarizer
-from cineswarm_discovery import DiscoveryEngine, parse_json
+from cineswarm_discovery import (
+    DiscoveryEngine,
+    TV_GROWTH_TASTE_SEEDS,
+    is_junk_series_title,
+    parse_json,
+    series_matches_tv_taste,
+    series_titles_align,
+)
 from cineswarm_health import MediaHealthScanner
 from cineswarm_library_brain import LibraryBrain
 from cineswarm_library_intelligence import VaultLibraryComprehension
@@ -113,6 +120,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/monitoring/incoming": "/api/monitoring/incoming",
     "/api/v1/monitoring/system": "/api/monitoring/system",
     "/api/v1/acquisition/progress": "/api/acquisition/progress",
+    "/api/v1/tv/growth/preview": "/api/tv/growth/preview",
 }
 
 
@@ -1937,6 +1945,100 @@ class ControlPlane:
             "remaining": remaining,
             "progress": f"{managed} → {target}",
             "off_switch": "CINESWARM_TV_GROWTH=false",
+        }
+
+    def tv_growth_preview(self, limit: int = 10) -> dict[str, Any]:
+        """Preview eligible TV growth candidates without creating tasks or searches."""
+        if not self.planner:
+            raise AgentError("Acquisition planner is not configured")
+        limit = max(1, min(int(limit), 25))
+        sonarr = self.planner.sonarr
+        series = sonarr.get("api/v3/series") or []
+        owned_ids = {item.get("tvdbId") for item in series if isinstance(item, dict) and item.get("tvdbId")}
+        owned_titles = {str(item.get("title") or "").casefold() for item in series if isinstance(item, dict)}
+        def policy_int(key: str, default: int) -> int:
+            try:
+                value = self.store.get_policy(key) or os.environ.get(key, str(default))
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        min_seasons = max(1, min(policy_int("CINESWARM_TV_GROWTH_MIN_SEASONS", 1), 20))
+        max_seasons = max(min_seasons, min(policy_int("CINESWARM_TV_GROWTH_MAX_SEASONS", 5), 20))
+        terms = list(TV_GROWTH_TASTE_SEEDS)
+        if self.discovery and self.discovery.playback_history:
+            try:
+                terms.extend(self.library_brain.watched_series_titles(limit=40))
+            except Exception:
+                pass
+        candidates: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        for term in terms:
+            if len(candidates) >= limit:
+                break
+            try:
+                matches = sonarr.get("api/v3/series/lookup", {"term": str(term)})
+            except Exception:
+                continue
+            for match in matches if isinstance(matches, list) else []:
+                if not isinstance(match, dict) or not match.get("tvdbId"):
+                    continue
+                title = str(match.get("title") or "").strip()
+                if not title or not series_titles_align(str(term), title) or is_junk_series_title(title):
+                    continue
+                if match.get("tvdbId") in owned_ids or title.casefold() in owned_titles or match.get("tvdbId") in seen:
+                    continue
+                if str(match.get("seriesType") or "standard").casefold() == "daily":
+                    continue
+                language = match.get("originalLanguage") or match.get("language") or "eng"
+                if isinstance(language, dict):
+                    language = language.get("name") or language.get("isoCode") or "eng"
+                if str(language).casefold() not in {"", "eng", "en", "english"}:
+                    continue
+                genres = match.get("genres") or []
+                network = match.get("network") or match.get("studio")
+                if not series_matches_tv_taste(genres, network=network, studio=match.get("studio")):
+                    continue
+                seasons = match.get("seasons") or []
+                season_numbers = []
+                episode_count = 0
+                for season in seasons if isinstance(seasons, list) else []:
+                    if not isinstance(season, dict):
+                        continue
+                    try:
+                        number = int(season.get("seasonNumber") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if number > 0:
+                        season_numbers.append(number)
+                        try:
+                            episode_count += int(season.get("episodeCount") or 0)
+                        except (TypeError, ValueError):
+                            pass
+                season_count = len(set(season_numbers))
+                if not min_seasons <= season_count <= max_seasons:
+                    continue
+                seen.add(match.get("tvdbId"))
+                candidates.append({
+                    "title": title,
+                    "year": match.get("year"),
+                    "tvdb_id": match.get("tvdbId"),
+                    "tmdb_id": match.get("tmdbId"),
+                    "seasons": season_count,
+                    "episodes": episode_count,
+                    "genres": genres,
+                    "network": network,
+                    "reason": "Matches comedy/animation household taste and the configured season window",
+                })
+                break
+        return {
+            "status": "ready",
+            "limit": limit,
+            "season_window": {"min": min_seasons, "max": max_seasons},
+            "managed": len(series),
+            "target": self.tv_growth_status().get("target", 200),
+            "candidates": candidates,
+            "read_only": True,
         }
 
 
@@ -4122,7 +4224,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _public_path(path: str, method: str) -> bool:
-        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming", "/api/monitoring/system", "/api/v1/monitoring/system", "/api/acquisition/progress", "/api/v1/acquisition/progress"}
+        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming", "/api/monitoring/system", "/api/v1/monitoring/system", "/api/acquisition/progress", "/api/v1/acquisition/progress", "/api/tv/growth/preview", "/api/v1/tv/growth/preview"}
         public_post = {"/api/webhooks/plex", "/api/webhooks/sabnzbd"}
         if method == "GET":
             return path in public_get
@@ -4213,6 +4315,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, metrics)
         elif canonical_path == "/api/acquisition/progress":
             self._send(200, self.plane.acquisition_progress())
+        elif canonical_path == "/api/tv/growth/preview":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = int(query.get("limit", ["10"])[0])
+            except ValueError:
+                self._send(400, {"error": "limit must be an integer"})
+                return
+            self._send(200, self.plane.tv_growth_preview(limit))
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):
