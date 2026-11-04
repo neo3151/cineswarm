@@ -210,6 +210,21 @@ class AcquisitionPlannerTests(unittest.TestCase):
         self.assertEqual(result["state"], "import_blocked")
         self.assertEqual(result["outcome_reason"], "importblocked")
 
+    def test_search_supports_bounded_sonarr_season_search(self):
+        class SearchClient:
+            def get(self, path, params=None):
+                if path == "api/v3/series/42":
+                    return {"id": 42, "title": "Example"}
+                raise AssertionError(path)
+
+            def post_json(self, path, payload):
+                return {"path": path, "payload": payload}
+
+        planner = AcquisitionPlanner(SearchClient(), SearchClient(), None)
+        result = planner.search({"media_type": "series", "service_id": 42, "season_number": 2})
+
+        self.assertEqual(result["payload"], {"name": "SeasonSearch", "seriesId": 42, "seasonNumber": 2})
+
     def test_failed_downloads_returns_only_failed_records_with_service_ids(self):
         queue = {
             "records": [

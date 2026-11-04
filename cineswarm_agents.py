@@ -915,7 +915,12 @@ class AcquisitionPlanner:
         item = client.get(item_path)
         if not isinstance(item, dict) or not item.get("id"):
             raise AgentError("Selected service item could not be revalidated")
-        command = {"name": "MoviesSearch", "movieIds": [int(item_id)]} if media_type == "movie" else {"name": "SeriesSearch", "seriesId": int(item_id)}
+        if media_type == "movie":
+            command = {"name": "MoviesSearch", "movieIds": [int(item_id)]}
+        elif payload.get("season_number") is not None:
+            command = {"name": "SeasonSearch", "seriesId": int(item_id), "seasonNumber": int(payload["season_number"])}
+        else:
+            command = {"name": "SeriesSearch", "seriesId": int(item_id)}
         return client.post_json("api/v3/command", command)
 
     def add(self, payload: dict[str, Any]) -> dict[str, Any]:
