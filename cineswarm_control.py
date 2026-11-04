@@ -2490,6 +2490,19 @@ class ControlPlane:
             native_id = item.get("source_native_id")
             media_type = item.get("media_type", "movie")
             if native_id and isinstance(native_id, int):
+                if media_type == "series" and self.planner is not None:
+                    try:
+                        series = self.planner.sonarr.get(f"api/v3/series/{int(native_id)}") or {}
+                        statistics = series.get("statistics") or {}
+                        if int(statistics.get("episodeFileCount") or 0) == 0:
+                            auto_heal_tasks.append({
+                                "title": item.get("title"),
+                                "status": "skipped_no_episode_files",
+                                "reason": "No imported episode files exist yet; this is not corrupt media.",
+                            })
+                            continue
+                    except Exception:
+                        pass
                 task_type = "radarr_search_retry_request" if media_type == "movie" else "sonarr_search_retry_request"
                 parent_id = f"health-repair:{media_type}:{native_id}"
                 if not self.store.task_exists(task_type, parent_id):
