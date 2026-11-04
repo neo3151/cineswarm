@@ -123,6 +123,18 @@ class MonitoringSnapshotHTTPTests(unittest.TestCase):
         self.assertEqual(payload["issues"][0]["code"], "av1_unaccelerated")
         self.assertEqual(payload, alias)
 
+    def test_acquisition_progress_route_is_public(self):
+        self.plane.acquisition_progress = lambda limit=100: {
+            "generated_at": "2026-11-04T00:00:00+00:00",
+            "observations": {"total": 2, "by_state": {"imported": 1, "search_no_release": 1}, "recent": []},
+            "tasks": {"by_status": {"completed": 2}, "pending_approval": 0},
+            "queue": {"movies": {}, "series": {}, "errors": {}},
+            "worker_jobs": [],
+        }
+        status, payload, _ = self.request("/api/acquisition/progress")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["observations"]["by_state"]["imported"], 1)
+
 
 class IncomingIssuesClassifierTests(unittest.TestCase):
     def test_healthy_snapshot_still_flags_stuck_plex_and_idle_acquire(self):

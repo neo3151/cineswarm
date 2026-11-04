@@ -112,6 +112,7 @@ READ_ONLY_V1_ALIASES = {
     "/api/v1/monitoring/snapshot": "/api/monitoring/snapshot",
     "/api/v1/monitoring/incoming": "/api/monitoring/incoming",
     "/api/v1/monitoring/system": "/api/monitoring/system",
+    "/api/v1/acquisition/progress": "/api/acquisition/progress",
 }
 
 
@@ -2681,6 +2682,48 @@ class ControlPlane:
         detail["errors"] = errors
         return detail
 
+    def acquisition_progress(self, limit: int = 100) -> dict[str, Any]:
+        """Summarize acquisition state for operators without triggering service actions."""
+        detail = self.store.queue_detail(max(1, min(int(limit), 250)))
+        downloads: dict[str, Any] = {"movies": {"records": [], "total_records": 0}, "series": {"records": [], "total_records": 0}}
+        errors: dict[str, str] = {}
+        if self.planner:
+            for media_type, key in (("movie", "movies"), ("series", "series")):
+                try:
+                    queue = self.planner.queue(media_type, timeout=float(os.environ.get("CINESWARM_PROBE_TIMEOUT", "5"))) or {}
+                    records = queue.get("records", []) if isinstance(queue, dict) else []
+                    downloads[key] = {
+                        "records": records[:50],
+                        "total_records": queue.get("total_records", queue.get("totalRecords", len(records))),
+                    }
+                except Exception as exc:
+                    errors[key] = str(exc)
+        observations = detail.get("observations") or []
+        by_state = Counter(str(item.get("state") or "unknown") for item in observations)
+        recent = []
+        for item in observations[: min(len(observations), 50)]:
+            details = item.get("details") or {}
+            recent.append({
+                "task_id": item.get("task_id"),
+                "title": details.get("title"),
+                "media_type": details.get("media_type"),
+                "state": item.get("state"),
+                "reason": details.get("outcome_reason"),
+                "checked_at": item.get("checked_at"),
+            })
+        task_counts = detail.get("task_counts") or {}
+        return {
+            "generated_at": now(),
+            "queue": {
+                "movies": downloads["movies"],
+                "series": downloads["series"],
+                "errors": errors,
+            },
+            "observations": {"total": len(observations), "by_state": dict(by_state), "recent": recent},
+            "tasks": {"by_status": task_counts, "pending_approval": task_counts.get("pending_approval", 0)},
+            "worker_jobs": detail.get("worker_jobs", [])[:50],
+        }
+
     def monitoring_snapshot(self, hours: int = 24) -> dict[str, Any]:
         """Compact read-only ops snapshot for external watchers and Discord live monitor."""
         hours = max(1, min(int(hours), 168))
@@ -4079,7 +4122,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _public_path(path: str, method: str) -> bool:
-        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming", "/api/monitoring/system", "/api/v1/monitoring/system"}
+        public_get = {"/api/health", "/api/v1/health", "/api/monitoring/snapshot", "/api/v1/monitoring/snapshot", "/api/monitoring/incoming", "/api/v1/monitoring/incoming", "/api/monitoring/system", "/api/v1/monitoring/system", "/api/acquisition/progress", "/api/v1/acquisition/progress"}
         public_post = {"/api/webhooks/plex", "/api/webhooks/sabnzbd"}
         if method == "GET":
             return path in public_get
@@ -4168,6 +4211,8 @@ class Handler(BaseHTTPRequestHandler):
             metrics = system_metrics()
             metrics["processes"] = top_processes()
             self._send(200, metrics)
+        elif canonical_path == "/api/acquisition/progress":
+            self._send(200, self.plane.acquisition_progress())
         elif self.path == "/api/discovery":
             self._send(200, {"candidates": self.plane.discovery_queue()})
         elif self.path.startswith("/api/editions"):
