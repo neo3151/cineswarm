@@ -97,7 +97,8 @@ def _linux_metrics() -> dict[str, Any]:
             "source": fields[1] if len(fields) > 1 else None,
         })
     containers = []
-    docker_ps = _command(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
+    docker_binary = shutil.which("docker") or "/usr/bin/docker"
+    docker_ps = _command([docker_binary, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
     for line in docker_ps.splitlines():
         name, _, status = line.partition("\t")
         if name in {"radarr", "sonarr", "sabnzbd", "plex", "samba"}:
