@@ -86,6 +86,22 @@ def _linux_metrics() -> dict[str, Any]:
     available = memory.get("MemAvailable", memory.get("MemFree", 0))
     disk = shutil.disk_usage("/")
     uptime_seconds = float(open("/proc/uptime", encoding="utf-8").read().split()[0])
+    mount_rows = []
+    for path in ["/mnt/media", *[f"/mnt/pool/disk{index}" for index in range(1, 8)]]:
+        mount_info = _command(["findmnt", "-n", "-o", "FSTYPE,SOURCE,TARGET", "--target", path])
+        fields = mount_info.split()
+        mount_rows.append({
+            "path": path,
+            "mounted": bool(fields),
+            "filesystem": fields[0] if fields else None,
+            "source": fields[1] if len(fields) > 1 else None,
+        })
+    containers = []
+    docker_ps = _command(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"])
+    for line in docker_ps.splitlines():
+        name, _, status = line.partition("\t")
+        if name in {"radarr", "sonarr", "sabnzbd", "plex", "samba"}:
+            containers.append({"name": name, "status": status})
     return {
         "host": platform.node() or "devtop",
         "os": f"{platform.system()} {platform.release()}",
@@ -100,6 +116,11 @@ def _linux_metrics() -> dict[str, Any]:
         "disk_free_gb": _gb(disk.free),
         "load": " ".join(open("/proc/loadavg", encoding="utf-8").read().split()[:3]),
         "uptime": f"{int(uptime_seconds // 86400)}d {int(uptime_seconds // 3600 % 24)}h",
+        "storage": {
+            "media_mount": next((item for item in mount_rows if item["path"] == "/mnt/media"), {}),
+            "pool_mounts": [item for item in mount_rows if item["path"] != "/mnt/media"],
+        },
+        "containers": containers,
     }
 
 

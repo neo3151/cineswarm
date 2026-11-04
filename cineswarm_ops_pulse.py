@@ -66,6 +66,24 @@ def classify_issues(metrics: dict[str, Any]) -> list[dict[str, Any]]:
             "severity": "critical",
             "summary": "Emergency stop is on; autopilot will not add or search.",
         })
+    storage = metrics.get("storage") or {}
+    media_mount = storage.get("media_mount") or {}
+    pool_mounts = storage.get("pool_mounts") or []
+    if media_mount and not media_mount.get("mounted"):
+        issues.append({
+            "code": "media_pool_unmounted",
+            "severity": "critical",
+            "summary": "The media pool is not mounted. Radarr, Sonarr, and SABnzbd should remain stopped to protect the library.",
+        })
+    elif pool_mounts:
+        missing_mounts = [item.get("path") for item in pool_mounts if not item.get("mounted")]
+        if missing_mounts:
+            issues.append({
+                "code": "media_pool_degraded",
+                "severity": "critical",
+                "summary": f"{len(missing_mounts)} media pool disk mounts are missing; acquisition is blocked.",
+                "missing_mounts": missing_mounts,
+            })
     if not metrics.get("worker_healthy", True):
         issues.append({
             "code": "worker_stale",
@@ -277,9 +295,15 @@ def collect_ops_metrics(plane: Any) -> dict[str, Any]:
         "series_incomplete": 0,
         "tv_growth_enabled": False,
         "tv_growth_target": 200,
+        "storage": {},
     }
 
     probe_timeout = float(__import__("os").environ.get("CINESWARM_PROBE_TIMEOUT", "5"))
+    try:
+        system = plane.system_metrics() if hasattr(plane, "system_metrics") else {}
+        metrics["storage"] = system.get("storage") or {}
+    except Exception:
+        pass
     planner = getattr(plane, "planner", None)
     if planner and hasattr(planner, "global_queue_pressure"):
         try:

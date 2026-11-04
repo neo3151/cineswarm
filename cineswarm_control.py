@@ -1692,6 +1692,9 @@ class ControlPlane:
             "policies": self.store.get_all_policies(),
         }
 
+    def system_metrics(self) -> dict[str, Any]:
+        return system_metrics()
+
     def av1_monitoring_enabled(self) -> bool:
         value = self.store.get_policy("CINESWARM_AV1_MONITORING_ENABLED") or os.environ.get("CINESWARM_AV1_MONITORING_ENABLED", "false")
         return str(value).lower() in {"1", "true", "yes", "on"}

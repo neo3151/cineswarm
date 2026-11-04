@@ -190,6 +190,22 @@ class IncomingIssuesClassifierTests(unittest.TestCase):
         )
         self.assertEqual(issues[0]["severity"], "attention")
 
+    def test_unmounted_media_pool_is_critical(self):
+        from cineswarm_ops_pulse import classify_issues
+
+        issues = classify_issues({
+            "worker_healthy": True,
+            "unhealthy_services": [],
+            "emergency_stop": False,
+            "storage": {
+                "media_mount": {"path": "/mnt/media", "mounted": False},
+                "pool_mounts": [],
+            },
+        })
+
+        self.assertEqual(issues[0]["code"], "media_pool_unmounted")
+        self.assertEqual(issues[0]["severity"], "critical")
+
     def test_tv_growth_progress_is_watch_only_and_reversible(self):
         from cineswarm_ops_pulse import classify_issues
         issues = classify_issues({
