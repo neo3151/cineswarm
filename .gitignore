@@ -4,6 +4,8 @@
 restore_credentials.sh
 *.key
 *.secret
+spotify_token.json
+spotify_seed.json
 
 # SQLite Databases & Backups
 *.db
@@ -36,4 +38,3 @@ generate_svg_charts.py
 .DS_Store
 .vscode/
 .idea/
-
