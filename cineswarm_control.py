@@ -1953,7 +1953,7 @@ class ControlPlane:
             raise AgentError("Acquisition planner is not configured")
         limit = max(1, min(int(limit), 25))
         sonarr = self.planner.sonarr
-        series = sonarr.get("api/v3/series") or []
+        series = sonarr.get("api/v3/series", timeout=5) or []
         owned_ids = {item.get("tvdbId") for item in series if isinstance(item, dict) and item.get("tvdbId")}
         owned_titles = {str(item.get("title") or "").casefold() for item in series if isinstance(item, dict)}
         def policy_int(key: str, default: int) -> int:
@@ -1973,11 +1973,14 @@ class ControlPlane:
                 pass
         candidates: list[dict[str, Any]] = []
         seen: set[Any] = set()
-        for term in terms:
+        deadline = time.monotonic() + 12
+        for term in terms[: max(20, limit * 4)]:
             if len(candidates) >= limit:
                 break
+            if time.monotonic() >= deadline:
+                break
             try:
-                matches = sonarr.get("api/v3/series/lookup", {"term": str(term)})
+                matches = sonarr.get("api/v3/series/lookup", {"term": str(term)}, timeout=5)
             except Exception:
                 continue
             for match in matches if isinstance(matches, list) else []:
