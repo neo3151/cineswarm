@@ -8,6 +8,7 @@ Run this locally in a large Terminal window on the secondary display:
 from __future__ import annotations
 
 import curses
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
@@ -22,6 +23,7 @@ from cineswarm_system import system_metrics, top_processes
 
 CONTROL_URL = os.environ.get("CINESWARM_MONITOR_URL", "http://192.168.1.23:8787").rstrip("/")
 REFRESH_SECONDS = float(os.environ.get("CINESWARM_MONITOR_REFRESH", "2"))
+REQUEST_TIMEOUT = float(os.environ.get("CINESWARM_MONITOR_TIMEOUT", "8"))
 
 
 def command(args: list[str]) -> str:
@@ -31,11 +33,11 @@ def command(args: list[str]) -> str:
         return ""
 
 
-def json_get(path: str) -> dict[str, Any]:
+def json_get(path: str, timeout: float = REQUEST_TIMEOUT) -> dict[str, Any]:
     try:
         request = urllib.request.Request(f"{CONTROL_URL}{path}", headers={"Accept": "application/json"})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=2) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         return payload if isinstance(payload, dict) else {}
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
@@ -123,7 +125,7 @@ def panel(window: Any, y: int, x: int, height: int, width: int, title: str, line
         safe_add(window, y + 1 + index, x + 2, line, 0, width - 4)
 
 
-def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: dict[str, Any], devtop: dict[str, Any], history: deque[float]) -> None:
+def draw(window: Any, snapshot: dict[str, Any], progress: dict[str, Any], incoming: dict[str, Any], mac: dict[str, Any], devtop: dict[str, Any], history: deque[float]) -> None:
     window.erase()
     height, width = window.getmaxyx()
     if height < 20 or width < 90:
@@ -154,13 +156,19 @@ def draw(window: Any, snapshot: dict[str, Any], incoming: dict[str, Any], mac: d
     panel(window, 3, 1, 9, left, f"MAC [{mac.get('host', 'local')}]", resource_lines(mac), 4)
     worker = snapshot.get("worker") or {}
     queue = snapshot.get("queue_pressure") or {}
+    progress_queue = progress.get("queue") or {}
+    movie_queue = progress_queue.get("movies") or {}
+    series_queue = progress_queue.get("series") or {}
+    queue_records = int(movie_queue.get("total_records") or 0) + int(series_queue.get("total_records") or 0)
+    task_counts = progress.get("tasks", {}).get("by_status") or {}
     panel(window, 3, 1 + left + gap, 9, right, f"DEVTOP [{devtop.get('host', 'remote')}]", resource_lines(devtop) if devtop else [
         "unavailable", "API endpoint did not respond",
     ], header_color)
     panel(window, 13, 1, 6, left, "CINESWARM OPS", [
-        f"WORKER {str(worker.get('status', '?')).upper():<10} age {worker.get('age_seconds', '?')}s",
-        f"QUEUE  {queue.get('active', 0)}/{queue.get('limit', 4)} active",
-        f"RADARR {snapshot.get('downloads', {}).get('movies', 0)}  SONARR {snapshot.get('downloads', {}).get('series', 0)}",
+        f"WORKER {str(worker.get('status', 'live')).upper():<10} age {worker.get('age_seconds', '?')}s",
+        f"QUEUE  {queue.get('active', queue_records)}/{queue.get('limit', 4)} active",
+        f"RADARR {movie_queue.get('total_records', 0)}  SONARR {series_queue.get('total_records', 0)}",
+        f"TASKS  pending {task_counts.get('pending_approval', 0)}",
         f"PLEX  {snapshot.get('library_integrity', {}).get('movies', {}).get('indexed', '?')} indexed",
     ], header_color)
 
@@ -204,11 +212,18 @@ def run(window: Any) -> None:
         if key in (ord("q"), ord("Q")):
             return
         if key in (ord("r"), ord("R")) or now - last_refresh >= REFRESH_SECONDS:
-            snapshot = json_get("/api/monitoring/snapshot")
-            incoming = json_get("/api/monitoring/incoming")
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                snapshot_future = pool.submit(json_get, "/api/monitoring/snapshot", 5)
+                progress_future = pool.submit(json_get, "/api/acquisition/progress", 10)
+                incoming_future = pool.submit(json_get, "/api/monitoring/incoming", 5)
+                system_future = pool.submit(json_get, "/api/monitoring/system", 8)
+                snapshot = snapshot_future.result()
+                progress = progress_future.result()
+                incoming = incoming_future.result()
+                devtop = system_future.result()
             mac = system_metrics()
             mac["processes"] = top_processes()
-            draw(window, snapshot, incoming, mac, json_get("/api/monitoring/system"), deque())
+            draw(window, snapshot, progress, incoming, mac, devtop, deque())
             last_refresh = now
         time.sleep(0.05)
 
